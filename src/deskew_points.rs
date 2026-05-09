@@ -22,7 +22,9 @@ pub fn deskew_points(imu_data: &Vec<DeltaRotation>, pcd: &Vec<PointXYZIT>) -> Ve
         let rotation = get_rotation_at_time(relevant_imu_data, point_time);
 
         let point_vec = Point3::new(x, y, z);
-        let deskewed_point = rotation.cast::<f32>() * point_vec;
+        // rotation = R(0→t): スキャン開始から時刻tまでの累積回転
+        // デスキューは「時刻tのボディ座標系 → スキャン開始座標系」への変換なので逆回転
+        let deskewed_point = rotation.inverse().cast::<f32>() * point_vec;
         deskewed_point_vecs.push(deskewed_point);
     }
 
@@ -49,7 +51,7 @@ fn get_rotation_at_time(imu_data: &[DeltaRotation], timestamp: f64) -> UnitQuate
         if delta.timestamp > timestamp {
             break;
         }
-        rotation = delta.delta_rotation * rotation; // Apply the delta rotation
+        rotation = rotation * delta.delta_rotation; // ボディ座標系の角速度なので右積が正しい
     }
 
     rotation

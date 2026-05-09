@@ -1,4 +1,4 @@
-use nalgebra::{Isometry3, Matrix3, Point3};
+use nalgebra::{Isometry3, Point3, Vector3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::compute_covariance::{VoxelKey, VoxelMap, voxel_key};
@@ -17,11 +17,8 @@ pub struct GicpCorrespondence {
     /// 最近傍target voxelの代表点
     pub target_mean: Point3<f32>,
 
-    /// source側GICP共分散
-    pub source_covariance: Matrix3<f32>,
-
-    /// target側GICP共分散
-    pub target_covariance: Matrix3<f32>,
+    /// target側の表面法線（Point-to-Plane ICP用）
+    pub target_normal: Vector3<f32>,
 
     /// 最近傍距離の二乗
     pub dist_sq: f32,
@@ -33,12 +30,12 @@ fn find_nearest_target_voxel(
     voxel_size: f32,
     search_range: i32,
     max_dist_sq: Option<f32>,
-) -> Option<(VoxelKey, Point3<f32>, Matrix3<f32>, f32)> {
+) -> Option<(VoxelKey, Point3<f32>, Vector3<f32>, f32)> {
     let base_key = voxel_key(query_point, voxel_size);
 
     let mut best_key: Option<VoxelKey> = None;
     let mut best_mean = Point3::new(0.0, 0.0, 0.0);
-    let mut best_cov = Matrix3::<f32>::identity();
+    let mut best_normal = Vector3::z();
     let mut best_dist_sq = max_dist_sq.unwrap_or(f32::INFINITY);
 
     for dz in -search_range..=search_range {
@@ -65,13 +62,13 @@ fn find_nearest_target_voxel(
                     best_dist_sq = dist_sq;
                     best_key = Some(key);
                     best_mean = target_cell.mean;
-                    best_cov = target_cell.gicp_covariance;
+                    best_normal = target_cell.normal;
                 }
             }
         }
     }
 
-    best_key.map(|key| (key, best_mean, best_cov, best_dist_sq))
+    best_key.map(|key| (key, best_mean, best_normal, best_dist_sq))
 }
 
 pub fn find_gicp_correspondences(
@@ -91,7 +88,7 @@ pub fn find_gicp_correspondences(
 
             let transformed_source_mean = source_to_target.transform_point(&source_cell.mean);
 
-            let (target_key, target_mean, target_covariance, dist_sq) = find_nearest_target_voxel(
+            let (target_key, target_mean, target_normal, dist_sq) = find_nearest_target_voxel(
                 &transformed_source_mean,
                 target_map,
                 voxel_size,
@@ -105,8 +102,7 @@ pub fn find_gicp_correspondences(
                 source_mean: source_cell.mean,
                 transformed_source_mean,
                 target_mean,
-                source_covariance: source_cell.gicp_covariance,
-                target_covariance,
+                target_normal,
                 dist_sq,
             })
         })

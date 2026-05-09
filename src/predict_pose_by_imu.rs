@@ -75,7 +75,9 @@ pub fn predict_pose_by_imu(
         };
 
         let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
-        q = delta_q * q; // Update orientation
+        // delta_rotationはボディ座標系の回転なので右積
+        // deskew_points.rsとの一貫性: convert_imu_data.rsも右積に遠いう
+        q = q * delta_q;
 
         // --- Update velocity ---
         let acc = Vector3::new(
@@ -84,12 +86,18 @@ pub fn predict_pose_by_imu(
             sample.linear_acceleration[2] as f64,
         );
 
-        // Sensor coordinates to world coordinates
-        let acc_world = q * acc;
+        // センサ座標系 → ワールド座標系へ変換
+        // linear_acceleration の単位は g なので G を掛けて m/s² に変換
+        let acc_world = q * acc * G;
+
+        // ワールド座標系で重力を除去
+        // センサZ軸は上向き正, 静止時acc≈[0,0,-1]g → ワールド系重力は[0,0,-G]
+        let gravity_world = Vector3::new(0.0, 0.0, -G);
+        let acc_no_gravity = acc_world - gravity_world;
 
         // --- Update position and velocity ---
-        velocity += acc_world * dt;
-        position += velocity * dt + 0.5 * acc_world * dt * dt;
+        velocity += acc_no_gravity * dt;
+        position += velocity * dt + 0.5 * acc_no_gravity * dt * dt;
 
         // Update last_time for the next iteration
         last_time = sample.timestamp;

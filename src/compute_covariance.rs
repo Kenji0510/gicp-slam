@@ -1,4 +1,4 @@
-use nalgebra::{Matrix3, Point3, SymmetricEigen, Vector3};
+use nalgebra::{Matrix3, Point3, SymmetricEigen, Unit, Vector3};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -27,6 +27,9 @@ pub struct VoxelCell {
     /// GICP用に正則化した共分散
     pub gicp_covariance: Matrix3<f32>,
 
+    /// Point-to-Plane ICP用の表面法線（共分散の最小固有ベクトル）
+    pub normal: Vector3<f32>,
+
     /// 十分な近傍点から共分散を計算できたか
     pub covariance_valid: bool,
 }
@@ -38,6 +41,7 @@ impl VoxelCell {
             mean: Point3::new(0.0, 0.0, 0.0),
             raw_covariance: Matrix3::identity(),
             gicp_covariance: Matrix3::identity(),
+            normal: Vector3::z(),
             covariance_valid: false,
         }
     }
@@ -155,7 +159,8 @@ fn compute_raw_covariance_from_points(points: &[Point3<f32>]) -> Option<Matrix3<
     Some(cov)
 }
 
-fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
+/// 共分散行列の最小固有ベクトル（表面法線）と正則化共分散を返す
+fn compute_normal_and_gicp_covariance(cov: Matrix3<f32>) -> (Vector3<f32>, Matrix3<f32>) {
     let eig = SymmetricEigen::new(cov);
 
     let mut min_idx = 0;
@@ -169,14 +174,16 @@ fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
     }
 
     let normal = eig.eigenvectors.column(min_idx).into_owned();
+    let normal_unit = Unit::new_normalize(normal).into_inner();
+    let gicp_cov = Matrix3::<f32>::identity() + (EPSILON - 1.0) * (normal_unit * normal_unit.transpose());
 
-    Matrix3::<f32>::identity() + (EPSILON - 1.0) * (normal * normal.transpose())
+    (normal_unit, gicp_cov)
 }
 
 pub fn compute_voxel_covariances_3x3x3(voxel_map: &mut VoxelMap, k_neighbors: usize) {
     let keys: Vec<VoxelKey> = voxel_map.keys().copied().collect();
 
-    let results: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>, bool)> = keys
+    let results: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>, Vector3<f32>, bool)> = keys
         .par_iter()
         .map(|&key| {
             let cell = voxel_map.get(&key).expect("voxel key should exist");
@@ -186,23 +193,25 @@ pub fn compute_voxel_covariances_3x3x3(voxel_map: &mut VoxelMap, k_neighbors: us
 
             match compute_raw_covariance_from_points(&neighbor_points) {
                 Some(raw_cov) => {
-                    let gicp_cov = regularize_gicp_covariance(raw_cov);
-                    (key, raw_cov, gicp_cov, true)
+                    let (normal, gicp_cov) = compute_normal_and_gicp_covariance(raw_cov);
+                    (key, raw_cov, gicp_cov, normal, true)
                 }
                 None => (
                     key,
                     Matrix3::<f32>::identity(),
                     Matrix3::<f32>::identity(),
+                    Vector3::z(),
                     false,
                 ),
             }
         })
         .collect();
 
-    for (key, raw_cov, gicp_cov, valid) in results {
+    for (key, raw_cov, gicp_cov, normal, valid) in results {
         if let Some(cell) = voxel_map.get_mut(&key) {
             cell.raw_covariance = raw_cov;
             cell.gicp_covariance = gicp_cov;
+            cell.normal = normal;
             cell.covariance_valid = valid;
         }
     }
@@ -265,25 +274,26 @@ pub fn merge_points_into_voxel_map(
         .into_iter()
         .collect();
 
-    let results: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>, bool)> = keys_to_recompute
+    let results: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>, Vector3<f32>, bool)> = keys_to_recompute
         .par_iter()
         .map(|&key| {
             let cell = map.get(&key).expect("voxel key should exist");
             let neighbor_points = collect_nearest_points_3x3x3(map, key, &cell.mean, k_neighbors);
             match compute_raw_covariance_from_points(&neighbor_points) {
                 Some(raw_cov) => {
-                    let gicp_cov = regularize_gicp_covariance(raw_cov);
-                    (key, raw_cov, gicp_cov, true)
+                    let (normal, gicp_cov) = compute_normal_and_gicp_covariance(raw_cov);
+                    (key, raw_cov, gicp_cov, normal, true)
                 }
-                None => (key, Matrix3::identity(), Matrix3::identity(), false),
+                None => (key, Matrix3::identity(), Matrix3::identity(), Vector3::z(), false),
             }
         })
         .collect();
 
-    for (key, raw_cov, gicp_cov, valid) in results {
+    for (key, raw_cov, gicp_cov, normal, valid) in results {
         if let Some(cell) = map.get_mut(&key) {
             cell.raw_covariance = raw_cov;
             cell.gicp_covariance = gicp_cov;
+            cell.normal = normal;
             cell.covariance_valid = valid;
         }
     }

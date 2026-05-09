@@ -15,8 +15,8 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway04";
-const SAVE_DIR: &str = "data/output/debug";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway";
+const SAVE_DIR: &str = "data/output/debug/05092026";
 
 const GICP_ITERATIONS: usize = 7;
 
@@ -93,8 +93,9 @@ fn main() -> Result<()> {
         const MAX_ROT_FOR_MAP_UPDATE: f32 = 0.025; // rad（約1.43度）
         let allow_map_update = imu_rot_norm < MAX_ROT_FOR_MAP_UPDATE;
         // IMU回転をsource_to_targetの初期推定に適用（並進は重力未除去のため使わない）
-        // source_to_target.rotation = imu_delta_rot * source_to_target.rotation;
-        source_to_target.rotation = source_to_target.rotation * imu_delta_rot.inverse();
+        // R_new = R_old * delta_R （ボディ座標系の右積が正しい）
+        // NOTE: IMU誤差が蓄積する場合は無効化してICPのみで動作確認する
+        // source_to_target.rotation = source_to_target.rotation * imu_delta_rot;
         log::debug!("Frame {}: IMU rot_norm={:.4} rad, allow_map_update={}", i, imu_rot_norm, allow_map_update);
         // --- Predict pose by IMU ---
 
@@ -145,20 +146,13 @@ fn main() -> Result<()> {
             );
             // --- find nearest points ---
 
-            // --- compute GICP ---
-            let rotate_source_covariance = true;
-            // 壁接線方向のc_sum固有値は約2.0なので、それに対して有効な正則化を加える
-            let covariance_regularization = 1.0e-3;
-
+            // --- compute Point-to-Plane ICP ---
             let system = compute_gicp_linear_system(
                 &correspondences,
-                &source_to_target,
                 max_dist_sq.unwrap(),
-                rotate_source_covariance,
-                covariance_regularization,
             );
 
-            // H_ttの最小固有値 ≈ 0.5（壁接線方向）。1e-6では無効 → 0.1で抑制
+            // Hの対角成分を安定化するLevenberg-Marquardtダンピング
             let damping = 0.1;
 
             // Update source_to_target for the next iteration
@@ -190,21 +184,21 @@ fn main() -> Result<()> {
                 let delta_isometry = Isometry3::from_parts(translation, rotation);
                 source_to_target = delta_isometry * source_to_target;
 
-                let rot_norm = rot_vec.norm();
+                        let rot_norm = rot_vec.norm();
                 let trans_norm = trans_vec.norm();
-                log::debug!("GICP iter {}: rot={:.4} rad, trans={:.4} m", i, rot_norm, trans_norm);
+                log::debug!("P2Plane ICP iter {}: rot={:.4} rad, trans={:.4} m", i, rot_norm, trans_norm);
                 if rot_norm < 1.0e-4 && trans_norm < 1.0e-4 {
                     log::debug!("GICP converged at iteration {}", i);
                     break;
                 }
             } else {
                 log::warn!(
-                    "GICP failed to solve (insufficient correspondences) at iteration {}",
+                    "Point-to-Plane ICP failed to solve (insufficient correspondences) at iteration {}",
                     i
                 );
                 break;
             }
-            // --- compute GICP ---
+            // --- compute Point-to-Plane ICP ---
         }
 
         // 発散チェック：1フレームで1m以上動いたら棄却
@@ -225,7 +219,7 @@ fn main() -> Result<()> {
         );
 
         if translation_diff > 1.0 {
-            log::warn!("Frame {}: GICP diverged ({:.4}m), reverting pose and skipping map update", i, translation_diff);
+            log::warn!("Frame {}: P2Plane ICP diverged ({:.4}m), reverting pose and skipping map update", i, translation_diff);
             source_to_target = last_good_pose;
         } else if !allow_map_update {
             log::debug!("Frame {}: skipping map update due to large IMU rotation ({:.4} rad)", i, imu_rot_norm);
