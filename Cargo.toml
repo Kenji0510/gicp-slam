@@ -1,0 +1,21 @@
+[package]
+name = "lidar_slam"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+
+log = "0.4.28"
+env_logger = "0.11.8"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+
+pcd-rs = { version = "0.12.0", features = ["derive"] }
+
+nalgebra = "0.34.1"
+
+nohash-hasher = "0.2"
+rayon = "1.12.0"

@@ -1,0 +1,45 @@
+use pcd_rs::{PcdDeserialize, PcdSerialize};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LoadIMU {
+    pub timestamp: u64,
+    pub angular_velocity: [f32; 3],
+    pub linear_acceleration: [f32; 3],
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IMU {
+    pub timestamp: f64,
+    pub angular_velocity: [f32; 3],
+    pub linear_acceleration: [f32; 3],
+}
+
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZ {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZIT {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub intensity: f32,
+    pub timestamp: f64,
+}
+
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZCov {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub cov_xx: f32,
+    pub cov_xy: f32,
+    pub cov_xz: f32,
+    pub cov_yy: f32,
+    pub cov_yz: f32,
+    pub cov_zz: f32,
+}
