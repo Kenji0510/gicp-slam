@@ -15,7 +15,7 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05062026/04";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway04";
 const SAVE_DIR: &str = "data/output/debug";
 
 const GICP_ITERATIONS: usize = 7;
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
         let (roll, pitch, yaw) = imu_delta_rot.euler_angles();
         let imu_rot_norm = (roll * roll + pitch * pitch + yaw * yaw).sqrt();
         // 回転が大きいフレームはマップ更新しない
-        const MAX_ROT_FOR_MAP_UPDATE: f32 = 0.01; // rad（約0.57度）
+        const MAX_ROT_FOR_MAP_UPDATE: f32 = 0.025; // rad（約1.43度）
         let allow_map_update = imu_rot_norm < MAX_ROT_FOR_MAP_UPDATE;
         // IMU回転をsource_to_targetの初期推定に適用（並進は重力未除去のため使わない）
         // source_to_target.rotation = imu_delta_rot * source_to_target.rotation;
