@@ -22,6 +22,8 @@ pub struct PosePrediction {
     pub velocity: Vector3<f64>,
     // pub rotation: Vector3<f64>,
     pub delta_transform: Matrix4<f64>,
+    /// IMUから積分した回転量（重力除去なしのため並進は不正確）
+    pub delta_rotation: UnitQuaternion<f64>,
 }
 
 const G: f64 = 9.80665;
@@ -35,10 +37,16 @@ pub fn predict_pose_by_imu(
         velocity: Vector3::zeros(),
         // rotation: Vector3::zeros(),
         delta_transform: Matrix4::identity(),
+        delta_rotation: UnitQuaternion::identity(),
     };
 
     // --- Find the imu data from previous start frame time to current start frame time ---
     let (start_idx, end_idx) = get_imu_range(imu_data, frame_time_range);
+
+    if start_idx == 0 || start_idx >= imu_data.len() || end_idx > imu_data.len() {
+        return empty_result;
+    }
+
     let relevant_imu_data = &imu_data[start_idx..end_idx];
 
     let mut last_time = imu_data[start_idx - 1].timestamp; // Use the timestamp of the last IMU data point before the frame start
@@ -101,6 +109,7 @@ pub fn predict_pose_by_imu(
         velocity,
         // rotation: q.euler_angles().into(),
         delta_transform,
+        delta_rotation: q,
     }
 }
 

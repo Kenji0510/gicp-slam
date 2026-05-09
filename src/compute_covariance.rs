@@ -220,3 +220,71 @@ pub fn build_gicp_voxel_map(
 
     voxel_map
 }
+
+/// 変換済み点群を既存のVoxelMapに追加し、変更されたvoxelの共分散を再計算する。
+/// `pose` で変換してからマップに登録する（SLAMマップ更新用）。
+pub fn merge_points_into_voxel_map(
+    map: &mut VoxelMap,
+    points: &[Point3<f32>],
+    pose: &nalgebra::Isometry3<f32>,
+    voxel_size: f32,
+    max_points_per_voxel: usize,
+    k_neighbors: usize,
+) {
+    let mut modified_keys: std::collections::HashSet<VoxelKey> = std::collections::HashSet::new();
+
+    for p in points {
+        let transformed = pose.transform_point(p);
+        let key = voxel_key(&transformed, voxel_size);
+
+        let cell = map.entry(key).or_insert_with(VoxelCell::new);
+
+        if cell.points.len() < max_points_per_voxel {
+            cell.points.push(transformed);
+            cell.recompute_mean();
+            modified_keys.insert(key);
+        }
+    }
+
+    // 変更されたvoxelとその隣接voxelの共分散を再計算
+    let keys_to_recompute: Vec<VoxelKey> = modified_keys
+        .iter()
+        .flat_map(|k| {
+            (-1..=1).flat_map(move |dx| {
+                (-1..=1).flat_map(move |dy| {
+                    (-1..=1).map(move |dz| VoxelKey {
+                        ix: k.ix + dx,
+                        iy: k.iy + dy,
+                        iz: k.iz + dz,
+                    })
+                })
+            })
+        })
+        .filter(|k| map.contains_key(k))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let results: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>, bool)> = keys_to_recompute
+        .par_iter()
+        .map(|&key| {
+            let cell = map.get(&key).expect("voxel key should exist");
+            let neighbor_points = collect_nearest_points_3x3x3(map, key, &cell.mean, k_neighbors);
+            match compute_raw_covariance_from_points(&neighbor_points) {
+                Some(raw_cov) => {
+                    let gicp_cov = regularize_gicp_covariance(raw_cov);
+                    (key, raw_cov, gicp_cov, true)
+                }
+                None => (key, Matrix3::identity(), Matrix3::identity(), false),
+            }
+        })
+        .collect();
+
+    for (key, raw_cov, gicp_cov, valid) in results {
+        if let Some(cell) = map.get_mut(&key) {
+            cell.raw_covariance = raw_cov;
+            cell.gicp_covariance = gicp_cov;
+            cell.covariance_valid = valid;
+        }
+    }
+}

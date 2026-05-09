@@ -1,6 +1,4 @@
-use nalgebra::{
-    Isometry3, Matrix3, SMatrix, SVector, Vector3,
-};
+use nalgebra::{Isometry3, Matrix3, SMatrix, SVector, Vector3};
 use rayon::prelude::*;
 
 use crate::find_nearest_points::GicpCorrespondence;
@@ -172,10 +170,7 @@ fn compute_one_gicp_term(
     })
 }
 
-pub fn solve_gicp_delta(
-    system: &GicpLinearSystem,
-    damping: f32,
-) -> Option<Vector6f> {
+pub fn solve_gicp_delta(system: &GicpLinearSystem, damping: f32) -> Option<Vector6f> {
     if system.used_count < 6 {
         return None;
     }
@@ -222,14 +217,11 @@ pub fn compute_gicp_linear_system(
                 covariance_regularization,
             )
         })
-        .reduce(
-            GicpLinearSystem::default,
-            |mut acc, item| {
-                acc.h += item.h;
-                acc.b += item.b;
-                acc.cost += item.cost;
-                acc.used_count += item.used_count;
-                acc
-            },
-        )
+        .reduce(GicpLinearSystem::default, |mut acc, item| {
+            acc.h += item.h;
+            acc.b += item.b;
+            acc.cost += item.cost;
+            acc.used_count += item.used_count;
+            acc
+        })
 }
