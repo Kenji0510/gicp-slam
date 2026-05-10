@@ -9,3 +9,4 @@ pub mod gaussian_matching;
 pub mod predict_pose_by_imu;
 pub mod types;
 pub mod voxelization;
+pub mod gicp_gaussian_shape;

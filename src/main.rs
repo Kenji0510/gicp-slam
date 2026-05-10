@@ -9,16 +9,16 @@ use lidar_slam::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
     },
     find_nearest_points::find_gaussian_correspondences,
-    gaussian_matching::{compute_gaussian_linear_system, solve_gaussian_delta},
+    gicp_gaussian_shape::{compute_gaussian_shape_linear_system, solve_gaussian_delta, GaussianShapeOptions},
     predict_pose_by_imu::{align_imu_timestamps, predict_pose_by_imu},
     voxelization::voxel_downsample_points,
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park06";
 const SAVE_DIR: &str = "data/output/debug/05092026";
 
-const GAUSSIAN_ITERATIONS: usize = 5;
+const GAUSSIAN_ITERATIONS: usize = 7;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
@@ -49,8 +49,8 @@ fn main() -> Result<()> {
     let points = convert_pcd_to_xyz(&pcd);
 
     // --- Downsample for density normalization ---
-    let downsample_voxel_size = 0.05_f32;
-    let gaussian_voxel_size = 0.2_f32;
+    let downsample_voxel_size = 0.1_f32;
+    let gaussian_voxel_size = 0.4_f32;
 
     let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
     // --- Downsample for density normalization ---
@@ -160,14 +160,23 @@ fn main() -> Result<()> {
             );
             // --- find nearest points ---
 
-            // --- compute GICP ---
-            // Gaussian mean-to-mean with covariance weighting.
-            let system = compute_gaussian_linear_system(
+            // --- compute Gaussian shape matching ---
+            // mean-to-mean項 + covariance shape-to-shape項。
+            let shape_options = GaussianShapeOptions {
+                mean_weight: 1.0,
+                shape_weight: 0.05,
+                covariance_regularization,
+                max_euclidean_dist_sq: max_euclidean_dist_sq.unwrap(),
+                max_mahalanobis_dist,
+                shape_fd_epsilon: 1.0e-3,
+                normalize_shape_by_trace: true,
+                min_trace: 1.0e-6,
+            };
+
+            let system = compute_gaussian_shape_linear_system(
                 &correspondences,
                 &source_to_target,
-                max_euclidean_dist_sq.unwrap(),
-                max_mahalanobis_dist,
-                covariance_regularization,
+                &shape_options,
             );
 
             // H_ttの最小固有値 ≈ 0.5（壁接線方向）。1e-6では無効 → 0.1で抑制
