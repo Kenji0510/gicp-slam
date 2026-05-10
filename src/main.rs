@@ -15,8 +15,8 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway04";
-const SAVE_DIR: &str = "data/output/debug";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park05";
+const SAVE_DIR: &str = "data/output/debug/05092026";
 
 const GICP_ITERATIONS: usize = 7;
 
@@ -49,11 +49,11 @@ fn main() -> Result<()> {
     let points = convert_pcd_to_xyz(&pcd);
 
     // --- Downsample the point cloud ---
-    let voxel_size = 0.05;
+    let voxel_size = 0.1;
     let downsampled_init_points = voxel_downsample_points(&points, voxel_size);
     // --- Downsample the point cloud ---
-    let max_points_per_voxel = 20;
-    let k_neighbors = 15;
+    let max_points_per_voxel = 15;
+    let k_neighbors = 8;
 
     let mut target_voxel_map = build_gicp_voxel_map(
         &downsampled_init_points,
@@ -70,8 +70,8 @@ fn main() -> Result<()> {
     let mut source_to_target =
         Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
 
-    let max_points_per_voxel = 20;
-    let k_neighbors = 15;
+    let max_points_per_voxel = 15;
+    let k_neighbors = 8;
     let mut prev_frame_time = pcd_start_time; // フレーム間のIMU積分用
 
     for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
@@ -248,8 +248,9 @@ fn main() -> Result<()> {
 
     // --- Debug: Save final voxel map as PCD ---
     let final_pcd = convert_voxel_map_to_pcd(&target_voxel_map);
-    let save_file_path = format!("{}/final_voxel_map_v-{}.pcd", SAVE_DIR, voxel_size);
+    let save_file_path = format!("{}/final_voxel_map_gicp_v-{}.pcd", SAVE_DIR, voxel_size);
     save_pcd_xyzcov(&final_pcd, &save_file_path)?;
+    log::debug!("Saved final voxel map as PCD: {}", save_file_path);
     // --- Debug: Save final voxel map as PCD ---
 
     // let downsampled_pcd = convert_xyz_to_pcd(&downsampled_points);
