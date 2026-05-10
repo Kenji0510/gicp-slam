@@ -40,6 +40,7 @@ pub fn convert_imu_data(imu_data: &Vec<IMU>) -> Vec<DeltaRotation> {
             Unit::new_normalize(omega * dt)
         };
 
+        // delta_rotation: body-frame rotation increment (right-compose for body-frame ω)
         let delta_rotation = UnitQuaternion::from_axis_angle(&axis, angle);
         delta_rotations.push(DeltaRotation {
             timestamp: sample.timestamp,

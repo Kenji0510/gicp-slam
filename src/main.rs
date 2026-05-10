@@ -11,14 +11,15 @@ use lidar_slam::{
     find_nearest_points::find_gaussian_correspondences,
     gicp_gaussian_shape::{compute_gaussian_shape_linear_system, solve_gaussian_delta, GaussianShapeOptions},
     predict_pose_by_imu::{align_imu_timestamps, predict_pose_by_imu},
+    tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
     voxelization::voxel_downsample_points,
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park06";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park05";
 const SAVE_DIR: &str = "data/output/debug/05092026";
 
-const GAUSSIAN_ITERATIONS: usize = 7;
+const GAUSSIAN_ITERATIONS: usize = 5;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
@@ -55,11 +56,33 @@ fn main() -> Result<()> {
     let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
     // --- Downsample for density normalization ---
 
+    let converted_imu_data = convert_imu_data(&imu_data);
+    let pcd_start_time = pcd
+        .iter()
+        .map(|p| p.timestamp)
+        .fold(f64::INFINITY, f64::min);
+
+    // --- Tilt correction for initial frame ---
+    let init_gravity = estimate_gravity_from_imu(&imu_data, pcd_start_time, 2.0);
+    // 静止時重力をワールドフレーム重力として固定（初期ボディ座標=ワールド座標）
+    let gravity_world_g = init_gravity.cast::<f64>();
+    let init_tilt_correction = compute_tilt_correction(&init_gravity);
+    let downsampled_init_points =
+        apply_tilt_correction(&downsampled_init_points, &init_tilt_correction);
+    log::debug!(
+        "Initial frame tilt correction: gravity=[{:.3},{:.3},{:.3}]",
+        init_gravity.x, init_gravity.y, init_gravity.z
+    );
+    // --- Tilt correction ---
+
     // --- Build initial Gaussian voxel map ---
-    let max_points_per_gaussian = 100;
+    let max_points_per_gaussian = 200;
     let min_points_per_gaussian = 5;
-    let covariance_min_variance = 1.0e-4_f32;
-    let covariance_max_variance = 1.0_f32;
+    // min_variance: 小さすぎると平面法線方向の固有値が全voxelで揃い共分散が均一に見える
+    // voxel_size=0.4m での自然な下限は ~1e-2（≈10cm²）程度
+    let covariance_min_variance = 1.0e-2_f32;
+    // max_variance: voxel対角線(0.4*√3≈0.69m)の半分の二乗≈0.12。余裕を持たせ0.5
+    let covariance_max_variance = 0.5_f32;
     let covariance_regularization = 1.0e-3_f32;
 
     let mut target_voxel_map = build_gaussian_voxel_map(
@@ -72,16 +95,14 @@ fn main() -> Result<()> {
         covariance_regularization,
     );
     // --- Build initial Gaussian voxel map ---
-
-    let converted_imu_data = convert_imu_data(&imu_data);
-    let pcd_start_time = pcd
-        .iter()
-        .map(|p| p.timestamp)
-        .fold(f64::INFINITY, f64::min);
     let mut source_to_target =
         Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
 
     let mut prev_frame_time = pcd_start_time; // フレーム間のIMU積分用
+    let mut pose_log: Vec<serde_json::Value> = Vec::new();
+    let mut consecutive_skip_count: usize = 0;
+    // マップが陳腐化しないよう、連続スキップ上限を設ける
+    const MAX_CONSECUTIVE_SKIPS: usize = 10;
 
     for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
         let source_pcd = load_pcd_xyzit(&pcd_path.to_string_lossy())?;
@@ -93,18 +114,19 @@ fn main() -> Result<()> {
             .fold(f64::INFINITY, f64::min);
 
         let frame_time_range = (prev_frame_time, source_pcd_start_time);
-        let pose_prediction = predict_pose_by_imu(&imu_data, frame_time_range);
-        // IMU回転量を取得
+        let pose_prediction = predict_pose_by_imu(&imu_data, frame_time_range, &gravity_world_g);
+        // IMU回転量を取得（クォータニオンの回転角を使用）
         let imu_delta_rot = pose_prediction.delta_rotation.cast::<f32>();
-        let (roll, pitch, yaw) = imu_delta_rot.euler_angles();
-        let imu_rot_norm = (roll * roll + pitch * pitch + yaw * yaw).sqrt();
+        let imu_rot_angle = imu_delta_rot.angle(); // 真の回転角 [rad]
         // 回転が大きいフレームはマップ更新しない
-        const MAX_ROT_FOR_MAP_UPDATE: f32 = 0.025; // rad（約1.43度）
-        let allow_map_update = imu_rot_norm < MAX_ROT_FOR_MAP_UPDATE;
+        // ただし連続スキップ上限を超えたら地図陳腐化防止のため強制更新
+        const MAX_ROT_FOR_MAP_UPDATE: f32 = 0.025; // rad（≈1.43度）
+        let allow_map_update =
+            imu_rot_angle < MAX_ROT_FOR_MAP_UPDATE || consecutive_skip_count >= MAX_CONSECUTIVE_SKIPS;
         // IMU回転をsource_to_targetの初期推定に適用（並進は重力未除去のため使わない）
-        // source_to_target.rotation = imu_delta_rot * source_to_target.rotation;
-        source_to_target.rotation = source_to_target.rotation * imu_delta_rot.inverse();
-        log::debug!("Frame {}: IMU rot_norm={:.4} rad, allow_map_update={}", i, imu_rot_norm, allow_map_update);
+        // R_{world←body_new} = R_{world←body_old} * R_{imu_delta}  （右合成）
+        source_to_target.rotation = source_to_target.rotation * imu_delta_rot;
+        log::debug!("Frame {}: IMU rot_angle={:.4} rad, consecutive_skips={}, allow_map_update={}", i, imu_rot_angle, consecutive_skip_count, allow_map_update);
         // --- Predict pose by IMU ---
 
         // --- Deskew source pcd ---
@@ -114,6 +136,16 @@ fn main() -> Result<()> {
         // --- Downsample the deskewed point cloud ---
         let downsampled_points = voxel_downsample_points(&deskewed_points, downsample_voxel_size);
         // --- Downsample the deskewed point cloud ---
+
+        // --- Tilt correction ---
+        let frame_gravity = estimate_gravity_from_imu(&imu_data, source_pcd_start_time, 2.0);
+        let tilt_correction = compute_tilt_correction(&frame_gravity);
+        let downsampled_points = apply_tilt_correction(&downsampled_points, &tilt_correction);
+        log::debug!(
+            "Frame {:>4}: tilt gravity=[{:.3},{:.3},{:.3}]",
+            i, frame_gravity.x, frame_gravity.y, frame_gravity.z
+        );
+        // --- Tilt correction ---
 
         // --- Build source Gaussian voxel map ---
         let source_voxel_map = build_gaussian_voxel_map(
@@ -128,6 +160,7 @@ fn main() -> Result<()> {
         // --- Build source Gaussian voxel map ---
 
         let last_good_pose = source_to_target;
+        let mut last_num_correspondences = 0usize;
 
         for i in 0..GAUSSIAN_ITERATIONS {
             // --- find nearest points ---
@@ -144,6 +177,7 @@ fn main() -> Result<()> {
                 max_mahalanobis_dist,
                 covariance_regularization,
             );
+            last_num_correspondences = correspondences.len();
 
             if correspondences.is_empty() {
                 log::warn!("Frame {}: No correspondences found at iteration {}, skipping frame", i, i);
@@ -230,6 +264,9 @@ fn main() -> Result<()> {
 
         // 発散チェック：1フレームで1m以上動いたら棄却
         let translation_diff = (source_to_target.translation.vector - last_good_pose.translation.vector).norm();
+        let proposed_tx = source_to_target.translation.x;
+        let proposed_ty = source_to_target.translation.y;
+        let proposed_tz = source_to_target.translation.z;
         let (r, p, y) = source_to_target.rotation.euler_angles();
         log::info!(
             "Frame {:>4}: trans_diff={:.4}m  pose=({:.3},{:.3},{:.3})  rot_rpy=({:.3},{:.3},{:.3})  imu_rot={:.4}  map_update={}",
@@ -239,17 +276,20 @@ fn main() -> Result<()> {
             source_to_target.translation.y,
             source_to_target.translation.z,
             r, p, y,
-            imu_rot_norm,
+            imu_rot_angle,
             if translation_diff > 1.0 { "DIVERGED" }
             else if !allow_map_update { "SKIP(rot)" }
-            else { "OK" }
+            else if consecutive_skip_count == 0 { "OK" }
+            else { "FORCE_UPDATE" }
         );
 
         if translation_diff > 1.0 {
             log::warn!("Frame {}: Gaussian diverged ({:.4}m), reverting pose and skipping map update", i, translation_diff);
             source_to_target = last_good_pose;
+            consecutive_skip_count += 1;
         } else if !allow_map_update {
-            log::debug!("Frame {}: skipping map update due to large IMU rotation ({:.4} rad)", i, imu_rot_norm);
+            log::debug!("Frame {}: skipping map update due to large IMU rotation ({:.4} rad)", i, imu_rot_angle);
+            consecutive_skip_count += 1;
         } else {
             // --- Update target_voxel_map for the next frame ---
             merge_points_into_gaussian_voxel_map(
@@ -263,12 +303,47 @@ fn main() -> Result<()> {
                 covariance_max_variance,
                 covariance_regularization,
             );
+            if consecutive_skip_count >= MAX_CONSECUTIVE_SKIPS {
+                log::warn!("Frame {}: forced map update after {} consecutive skips", i, consecutive_skip_count);
+            }
+            consecutive_skip_count = 0;
             log::debug!("Frame {}: Map updated. pose = {:?}", i, source_to_target.translation);
             //  --- Update target_voxel_map for the next frame ---
         }
 
+        let status = if translation_diff > 1.0 {
+            "DIVERGED"
+        } else if !allow_map_update {
+            "SKIP_ROT"
+        } else if consecutive_skip_count == 0 {
+            "OK"
+        } else {
+            "FORCE_UPDATE"
+        };
+        pose_log.push(serde_json::json!({
+            "frame":              i,
+            "timestamp":          source_pcd_start_time,
+            "proposed_tx":        proposed_tx,
+            "proposed_ty":        proposed_ty,
+            "proposed_tz":        proposed_tz,
+            "proposed_roll":      r,
+            "proposed_pitch":     p,
+            "proposed_yaw":       y,
+            "translation_diff":   translation_diff,
+            "imu_rot_norm":       imu_rot_angle,
+            "consecutive_skips":  consecutive_skip_count,
+            "num_correspondences":last_num_correspondences,
+            "status":             status,
+        }));
+
         prev_frame_time = source_pcd_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
+
+    // --- Save pose log as JSON ---
+    let log_path = format!("{}/pose_log.json", SAVE_DIR);
+    std::fs::write(&log_path, serde_json::to_string_pretty(&pose_log)?)?;
+    log::info!("Saved pose log ({} frames): {}", pose_log.len(), log_path);
+    // --- Save pose log as JSON ---
 
     // --- Debug: Save final voxel map as PCD ---
     let final_pcd = convert_voxel_map_to_pcd(&target_voxel_map);

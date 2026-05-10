@@ -49,7 +49,7 @@ fn get_rotation_at_time(imu_data: &[DeltaRotation], timestamp: f64) -> UnitQuate
         if delta.timestamp > timestamp {
             break;
         }
-        rotation = delta.delta_rotation * rotation; // Apply the delta rotation
+        rotation = rotation * delta.delta_rotation; // body-frame ω → right-compose
     }
 
     rotation

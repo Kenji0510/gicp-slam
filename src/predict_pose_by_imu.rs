@@ -22,15 +22,18 @@ pub struct PosePrediction {
     pub velocity: Vector3<f64>,
     // pub rotation: Vector3<f64>,
     pub delta_transform: Matrix4<f64>,
-    /// IMUから積分した回転量（重力除去なしのため並進は不正確）
+    /// IMUから積分した回転量
     pub delta_rotation: UnitQuaternion<f64>,
 }
 
 const G: f64 = 9.80665;
 
+/// `static_gravity_g`: センサ静止時のlinear_acceleration計測値（g単位）。
+/// 初期ボディフレーム＝ワールドフレームとして、この方向をワールド重力として固定除去する。
 pub fn predict_pose_by_imu(
     imu_data: &Vec<IMU>,
     frame_time_range: (f64, f64), // (start_time, end_time) sec
+    static_gravity_g: &Vector3<f64>,
 ) -> PosePrediction {
     let empty_result = PosePrediction {
         position: Vector3::zeros(),
@@ -75,7 +78,7 @@ pub fn predict_pose_by_imu(
         };
 
         let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
-        q = delta_q * q; // Update orientation
+        q = q * delta_q; // Update orientation (body-frame ω → right-compose)
 
         // --- Update velocity ---
         let acc = Vector3::new(
@@ -84,8 +87,9 @@ pub fn predict_pose_by_imu(
             sample.linear_acceleration[2] as f64,
         );
 
-        // Sensor coordinates to world coordinates
-        let acc_world = q * acc;
+        // g単位→m/s²変換してワールドフレームへ回転し、重力を除去
+        // static_gravity_g はワールドフレームの重力方向（初期ボディ=ワールド座標）
+        let acc_world = q * (acc * G) - static_gravity_g * G;
 
         // --- Update position and velocity ---
         velocity += acc_world * dt;
