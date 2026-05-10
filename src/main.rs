@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lidar_slam::{
-    compute_covariance::{build_gicp_voxel_map, merge_points_into_voxel_map},
+    compute_covariance::{build_gaussian_voxel_map, merge_points_into_gaussian_voxel_map},
     convert_imu_data::convert_imu_data,
     convert_type::{convert_pcd_to_xyz, convert_xyz_to_pcd},
     debug::convert_voxel_map_to_pcd,
@@ -8,17 +8,17 @@ use lidar_slam::{
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
     },
-    find_nearest_points::find_gicp_correspondences,
-    gicp::{compute_gicp_linear_system, solve_gicp_delta},
+    find_nearest_points::find_gaussian_correspondences,
+    gaussian_matching::{compute_gaussian_linear_system, solve_gaussian_delta},
     predict_pose_by_imu::{align_imu_timestamps, predict_pose_by_imu},
     voxelization::voxel_downsample_points,
 };
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway04";
-const SAVE_DIR: &str = "data/output/debug";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway";
+const SAVE_DIR: &str = "data/output/debug/05092026";
 
-const GICP_ITERATIONS: usize = 7;
+const GAUSSIAN_ITERATIONS: usize = 5;
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
@@ -48,19 +48,30 @@ fn main() -> Result<()> {
     let pcd = load_pcd_xyzit(&pcd_files[0].to_string_lossy())?;
     let points = convert_pcd_to_xyz(&pcd);
 
-    // --- Downsample the point cloud ---
-    let voxel_size = 0.05;
-    let downsampled_init_points = voxel_downsample_points(&points, voxel_size);
-    // --- Downsample the point cloud ---
-    let max_points_per_voxel = 20;
-    let k_neighbors = 15;
+    // --- Downsample for density normalization ---
+    let downsample_voxel_size = 0.05_f32;
+    let gaussian_voxel_size = 0.2_f32;
 
-    let mut target_voxel_map = build_gicp_voxel_map(
+    let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
+    // --- Downsample for density normalization ---
+
+    // --- Build initial Gaussian voxel map ---
+    let max_points_per_gaussian = 100;
+    let min_points_per_gaussian = 5;
+    let covariance_min_variance = 1.0e-4_f32;
+    let covariance_max_variance = 1.0_f32;
+    let covariance_regularization = 1.0e-3_f32;
+
+    let mut target_voxel_map = build_gaussian_voxel_map(
         &downsampled_init_points,
-        voxel_size,
-        max_points_per_voxel, // max points per voxel
-        k_neighbors,          // k neighbors for covariance estimation
+        gaussian_voxel_size,
+        max_points_per_gaussian,
+        min_points_per_gaussian,
+        covariance_min_variance,
+        covariance_max_variance,
+        covariance_regularization,
     );
+    // --- Build initial Gaussian voxel map ---
 
     let converted_imu_data = convert_imu_data(&imu_data);
     let pcd_start_time = pcd
@@ -70,8 +81,6 @@ fn main() -> Result<()> {
     let mut source_to_target =
         Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
 
-    let max_points_per_voxel = 20;
-    let k_neighbors = 15;
     let mut prev_frame_time = pcd_start_time; // フレーム間のIMU積分用
 
     for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
@@ -103,31 +112,37 @@ fn main() -> Result<()> {
         // --- Deskew source pcd ---
 
         // --- Downsample the deskewed point cloud ---
-        let downsampled_points = voxel_downsample_points(&deskewed_points, voxel_size);
+        let downsampled_points = voxel_downsample_points(&deskewed_points, downsample_voxel_size);
         // --- Downsample the deskewed point cloud ---
 
-        // --- Compute covariance matrices ---
-        let source_voxel_map = build_gicp_voxel_map(
+        // --- Build source Gaussian voxel map ---
+        let source_voxel_map = build_gaussian_voxel_map(
             &downsampled_points,
-            voxel_size,
-            max_points_per_voxel, // max points per voxel
-            k_neighbors,          // k neighbors for covariance estimation
+            gaussian_voxel_size,
+            max_points_per_gaussian,
+            min_points_per_gaussian,
+            covariance_min_variance,
+            covariance_max_variance,
+            covariance_regularization,
         );
-        // --- Compute covariance matrices ---
+        // --- Build source Gaussian voxel map ---
 
         let last_good_pose = source_to_target;
 
-        for i in 0..GICP_ITERATIONS {
+        for i in 0..GAUSSIAN_ITERATIONS {
             // --- find nearest points ---
             let search_range = 3; // 3x3x3 voxels
-            let max_dist_sq = Some(1.0_f32);
-            let correspondences = find_gicp_correspondences(
+            let max_euclidean_dist_sq = Some(1.0_f32);
+            let max_mahalanobis_dist = Some(25.0_f32);
+            let correspondences = find_gaussian_correspondences(
                 &source_voxel_map,
                 &target_voxel_map,
-                voxel_size,
+                gaussian_voxel_size,
                 &source_to_target,
                 search_range,
-                max_dist_sq,
+                max_euclidean_dist_sq,
+                max_mahalanobis_dist,
+                covariance_regularization,
             );
 
             if correspondences.is_empty() {
@@ -137,24 +152,21 @@ fn main() -> Result<()> {
 
             let mut dist = 0.0;
             for c in &correspondences {
-                dist += c.dist_sq;
+                dist += c.euclidean_dist_sq;
             }
             log::debug!(
-                "Average distance of correspondences: {}",
+                "Average euclidean distance of correspondences: {}",
                 dist / correspondences.len() as f32
             );
             // --- find nearest points ---
 
             // --- compute GICP ---
-            let rotate_source_covariance = true;
-            // 壁接線方向のc_sum固有値は約2.0なので、それに対して有効な正則化を加える
-            let covariance_regularization = 1.0e-3;
-
-            let system = compute_gicp_linear_system(
+            // Gaussian mean-to-mean with covariance weighting.
+            let system = compute_gaussian_linear_system(
                 &correspondences,
                 &source_to_target,
-                max_dist_sq.unwrap(),
-                rotate_source_covariance,
+                max_euclidean_dist_sq.unwrap(),
+                max_mahalanobis_dist,
                 covariance_regularization,
             );
 
@@ -162,7 +174,7 @@ fn main() -> Result<()> {
             let damping = 0.1;
 
             // Update source_to_target for the next iteration
-            if let Some(delta) = solve_gicp_delta(&system, damping) {
+            if let Some(delta) = solve_gaussian_delta(&system, damping) {
                 // delta[0..3] = 回転（Lie代数ベクトル）, delta[3..6] = 並進
                 // 発散防止：deltaが大きすぎる場合はスケールダウン
                 let max_rot_norm = 0.1_f32;   // rad
@@ -192,14 +204,14 @@ fn main() -> Result<()> {
 
                 let rot_norm = rot_vec.norm();
                 let trans_norm = trans_vec.norm();
-                log::debug!("GICP iter {}: rot={:.4} rad, trans={:.4} m", i, rot_norm, trans_norm);
+                log::debug!("Gaussian iter {}: rot={:.4} rad, trans={:.4} m", i, rot_norm, trans_norm);
                 if rot_norm < 1.0e-4 && trans_norm < 1.0e-4 {
-                    log::debug!("GICP converged at iteration {}", i);
+                    log::debug!("Gaussian converged at iteration {}", i);
                     break;
                 }
             } else {
                 log::warn!(
-                    "GICP failed to solve (insufficient correspondences) at iteration {}",
+                    "Gaussian failed to solve (insufficient correspondences) at iteration {}",
                     i
                 );
                 break;
@@ -225,19 +237,22 @@ fn main() -> Result<()> {
         );
 
         if translation_diff > 1.0 {
-            log::warn!("Frame {}: GICP diverged ({:.4}m), reverting pose and skipping map update", i, translation_diff);
+            log::warn!("Frame {}: Gaussian diverged ({:.4}m), reverting pose and skipping map update", i, translation_diff);
             source_to_target = last_good_pose;
         } else if !allow_map_update {
             log::debug!("Frame {}: skipping map update due to large IMU rotation ({:.4} rad)", i, imu_rot_norm);
         } else {
             // --- Update target_voxel_map for the next frame ---
-            merge_points_into_voxel_map(
+            merge_points_into_gaussian_voxel_map(
                 &mut target_voxel_map,
                 &downsampled_points,
                 &source_to_target,
-                voxel_size,
-                max_points_per_voxel,
-                k_neighbors,
+                gaussian_voxel_size,
+                max_points_per_gaussian,
+                min_points_per_gaussian,
+                covariance_min_variance,
+                covariance_max_variance,
+                covariance_regularization,
             );
             log::debug!("Frame {}: Map updated. pose = {:?}", i, source_to_target.translation);
             //  --- Update target_voxel_map for the next frame ---
@@ -248,8 +263,9 @@ fn main() -> Result<()> {
 
     // --- Debug: Save final voxel map as PCD ---
     let final_pcd = convert_voxel_map_to_pcd(&target_voxel_map);
-    let save_file_path = format!("{}/final_voxel_map_v-{}.pcd", SAVE_DIR, voxel_size);
+    let save_file_path = format!("{}/final_gaussian_map_v-{}.pcd", SAVE_DIR, gaussian_voxel_size);
     save_pcd_xyzcov(&final_pcd, &save_file_path)?;
+    log::info!("Saved final Gaussian voxel map as PCD: {}", save_file_path);
     // --- Debug: Save final voxel map as PCD ---
 
     // let downsampled_pcd = convert_xyz_to_pcd(&downsampled_points);
@@ -321,10 +337,10 @@ fn main() -> Result<()> {
 
     // let mut dist = 0.0;
     // for c in &correspondences {
-    //     dist += c.dist_sq;
+    //     dist += c.euclidean_dist_sq;
     // }
     // log::debug!(
-    //     "Average distance of correspondences: {}",
+    //     "Average euclidean distance of correspondences: {}",
     //     dist / correspondences.len() as f32
     // );
 
@@ -349,7 +365,7 @@ fn main() -> Result<()> {
 
     // let damping = 1.0e-6;
 
-    // if let Some(delta) = solve_gicp_delta(&system, damping) {
+    // if let Some(delta) = solve_gaussian_delta(&system, damping) {
     //     println!("GICP delta (tx, ty, tz, rx, ry, rz):");
     //     println!(
     //         "  translation: ({:.6}, {:.6}, {:.6})",
@@ -368,7 +384,7 @@ fn main() -> Result<()> {
     //     println!("  translation: {:?}", updated_pose.translation);
     //     println!("  rotation:    {:?}", updated_pose.rotation);
     // } else {
-    //     println!("GICP failed to solve (insufficient correspondences)");
+    //     println!("Gaussian failed to solve (insufficient correspondences)");
     // }
     // --- compute GICP ---
 

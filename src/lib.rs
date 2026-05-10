@@ -5,7 +5,7 @@ pub mod debug;
 pub mod deskew_points;
 pub mod file_handler;
 pub mod find_nearest_points;
-pub mod gicp;
+pub mod gaussian_matching;
 pub mod predict_pose_by_imu;
 pub mod types;
 pub mod voxelization;

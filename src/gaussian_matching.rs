@@ -1,24 +1,25 @@
 use nalgebra::{Isometry3, Matrix3, SMatrix, SVector, Vector3};
 use rayon::prelude::*;
 
-use crate::find_nearest_points::GicpCorrespondence;
+use crate::compute_covariance::{add_diagonal, invert_matrix3_safe};
+use crate::find_nearest_points::GaussianCorrespondence;
 
 pub type Matrix6f = SMatrix<f32, 6, 6>;
 pub type Vector6f = SVector<f32, 6>;
 
 #[derive(Debug, Clone)]
-pub struct GicpLinearSystem {
+pub struct GaussianLinearSystem {
     pub h: Matrix6f,
     pub b: Vector6f,
 
     /// sum(error^T Omega error)
     pub cost: f32,
 
-    /// 実際に使われた対応点数
+    /// 実際に使われた対応Gaussian数。
     pub used_count: usize,
 }
 
-impl Default for GicpLinearSystem {
+impl Default for GaussianLinearSystem {
     fn default() -> Self {
         Self {
             h: Matrix6f::zeros(),
@@ -29,66 +30,40 @@ impl Default for GicpLinearSystem {
     }
 }
 
-#[inline]
-fn is_finite_matrix3(m: &Matrix3<f32>) -> bool {
-    m.iter().all(|v| v.is_finite())
-}
-
-fn invert_covariance_safe(cov: Matrix3<f32>) -> Option<Matrix3<f32>> {
-    if !is_finite_matrix3(&cov) {
-        return None;
-    }
-
-    let det = cov.determinant();
-
-    if !det.is_finite() || det.abs() < 1.0e-12 {
-        return None;
-    }
-
-    cov.try_inverse()
-}
-
-fn compute_one_gicp_term(
-    corr: &GicpCorrespondence,
+fn compute_one_gaussian_term(
+    corr: &GaussianCorrespondence,
     r_mat: &Matrix3<f32>,
-    max_dist_sq: f32,
-    rotate_source_covariance: bool,
+    max_euclidean_dist_sq: f32,
+    max_mahalanobis_dist: Option<f32>,
     covariance_regularization: f32,
-) -> Option<GicpLinearSystem> {
-    if corr.dist_sq > max_dist_sq {
+) -> Option<GaussianLinearSystem> {
+    if corr.euclidean_dist_sq > max_euclidean_dist_sq {
         return None;
+    }
+
+    if let Some(max_score) = max_mahalanobis_dist {
+        if corr.mahalanobis_dist > max_score {
+            return None;
+        }
     }
 
     let ps = corr.transformed_source_mean;
     let pt = corr.target_mean;
 
-    let source_cov = if rotate_source_covariance {
-        r_mat * corr.source_covariance * r_mat.transpose()
-    } else {
-        corr.source_covariance
-    };
-
-    let mut c_sum = corr.target_covariance + source_cov;
-
-    // 数値安定化用。不要なら 0.0 を指定する。
-    if covariance_regularization > 0.0 {
-        c_sum[(0, 0)] += covariance_regularization;
-        c_sum[(1, 1)] += covariance_regularization;
-        c_sum[(2, 2)] += covariance_regularization;
-    }
-
-    let omega = invert_covariance_safe(c_sum)?;
+    let source_covariance = r_mat * corr.source_covariance * r_mat.transpose();
+    let c_sum = add_diagonal(
+        corr.target_covariance + source_covariance,
+        covariance_regularization,
+    );
+    let omega = invert_matrix3_safe(c_sum)?;
 
     // error = target - transformed_source
     let err: Vector3<f32> = pt.coords - ps.coords;
-
-    // We = Omega * error
     let we = omega * err;
 
     let x = ps.x;
     let y = ps.y;
     let z = ps.z;
-
     let p = ps.coords;
 
     let mut local_h = Matrix6f::zeros();
@@ -96,7 +71,6 @@ fn compute_one_gicp_term(
 
     // b_rot = p x We
     let b_rot = p.cross(&we);
-
     local_b[0] = b_rot.x;
     local_b[1] = b_rot.y;
     local_b[2] = b_rot.z;
@@ -106,7 +80,7 @@ fn compute_one_gicp_term(
     local_b[4] = we.y;
     local_b[5] = we.z;
 
-    // CUDA側の s_col と同じ
+    // small-angle rotation Jacobian columns for transformed point p.
     let s0 = Vector3::new(0.0, -z, y);
     let s1 = Vector3::new(z, 0.0, -x);
     let s2 = Vector3::new(-y, x, 0.0);
@@ -120,7 +94,6 @@ fn compute_one_gicp_term(
     let hcol1 = p.cross(&ws1);
     let hcol2 = p.cross(&ws2);
 
-    // H_rr
     local_h[(0, 0)] = hcol0.x;
     local_h[(1, 0)] = hcol0.y;
     local_h[(2, 0)] = hcol0.z;
@@ -162,7 +135,7 @@ fn compute_one_gicp_term(
 
     let cost = err.dot(&we);
 
-    Some(GicpLinearSystem {
+    Some(GaussianLinearSystem {
         h: local_h,
         b: local_b,
         cost,
@@ -170,36 +143,33 @@ fn compute_one_gicp_term(
     })
 }
 
-pub fn solve_gicp_delta(system: &GicpLinearSystem, damping: f32) -> Option<Vector6f> {
+pub fn solve_gaussian_delta(system: &GaussianLinearSystem, damping: f32) -> Option<Vector6f> {
     if system.used_count < 6 {
         return None;
     }
 
     let mut h = system.h;
 
-    // Levenberg-Marquardt 的な安定化
     if damping > 0.0 {
         for i in 0..6 {
             h[(i, i)] += damping;
         }
     }
 
-    // まずCholeskyを試す
     if let Some(chol) = h.cholesky() {
         return Some(chol.solve(&system.b));
     }
 
-    // ダメならLUでフォールバック
     h.lu().solve(&system.b)
 }
 
-pub fn compute_gicp_linear_system(
-    correspondences: &[GicpCorrespondence],
+pub fn compute_gaussian_linear_system(
+    correspondences: &[GaussianCorrespondence],
     source_to_target: &Isometry3<f32>,
-    max_dist_sq: f32,
-    rotate_source_covariance: bool,
+    max_euclidean_dist_sq: f32,
+    max_mahalanobis_dist: Option<f32>,
     covariance_regularization: f32,
-) -> GicpLinearSystem {
+) -> GaussianLinearSystem {
     let r_mat = source_to_target
         .rotation
         .to_rotation_matrix()
@@ -209,15 +179,15 @@ pub fn compute_gicp_linear_system(
     correspondences
         .par_iter()
         .filter_map(|corr| {
-            compute_one_gicp_term(
+            compute_one_gaussian_term(
                 corr,
                 &r_mat,
-                max_dist_sq,
-                rotate_source_covariance,
+                max_euclidean_dist_sq,
+                max_mahalanobis_dist,
                 covariance_regularization,
             )
         })
-        .reduce(GicpLinearSystem::default, |mut acc, item| {
+        .reduce(GaussianLinearSystem::default, |mut acc, item| {
             acc.h += item.h;
             acc.b += item.b;
             acc.cost += item.cost;
