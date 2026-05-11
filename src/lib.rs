@@ -1,6 +1,7 @@
 pub mod compute_covariance;
 pub mod convert_imu_data;
 pub mod convert_type;
+pub mod correct_posture;
 pub mod debug;
 pub mod deskew_points;
 pub mod file_handler;
