@@ -3,7 +3,7 @@ use lidar_slam::{
     compute_covariance::{build_gicp_voxel_map, merge_points_into_voxel_map},
     convert_imu_data::convert_imu_data,
     convert_type::{convert_pcd_to_xyz, convert_xyz_to_pcd},
-    correct_posture::get_lidar_posture,
+    correct_posture::{CoordSystem, correct_point_posture, get_lidar_posture},
     debug::convert_voxel_map_to_pcd,
     deskew_points::deskew_points,
     file_handler::{
@@ -17,7 +17,7 @@ use lidar_slam::{
 use nalgebra::{Isometry3, Translation3, UnitQuaternion};
 
 const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park05";
-const SAVE_DIR: &str = "data/output/debug/05092026";
+const SAVE_DIR: &str = "data/output/debug/05102026/debug";
 
 const GICP_ITERATIONS: usize = 7;
 
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     );
 
     // --- Get lidar posture ---
-    let lidar_posture = get_lidar_posture(&imu_data);
+    let lidar_posture = get_lidar_posture(&imu_data, CoordSystem::Lidar);
     log::debug!(
         "Initial lidar posture: quaternion=({:.4}, {:.4}, {:.4}, {:.4})",
         lidar_posture.w,
@@ -54,6 +54,22 @@ fn main() -> Result<()> {
         lidar_posture.k
     );
     // --- Get lidar posture ---
+
+    // --- Correction lidar posture ---
+    let original_pcd = load_pcd_xyzit(&pcd_files[0].to_string_lossy())?;
+    let corrected_points = correct_point_posture(&original_pcd, &lidar_posture);
+
+    let save_file_path = format!(
+        "{}/corrected_posture.pcd",
+        SAVE_DIR,
+    );
+    save_pcd_xyzit(&corrected_points, &save_file_path)?;
+    // --- Correction lidar posture ---
+
+
+
+
+
 
     // println!("{}", imu_data[0].timestamp);
 

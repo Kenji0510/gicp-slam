@@ -1,6 +1,6 @@
 use nalgebra::{Matrix4, Unit, UnitQuaternion, Vector3};
 
-use crate::types::{IMU, LoadIMU};
+use crate::{correct_posture::IMU_TO_LIDAR, types::{IMU, LoadIMU}};
 
 pub fn align_imu_timestamps(imu_data: &Vec<LoadIMU>) -> Vec<IMU> {
     let mut revised_imu_data = Vec::<IMU>::with_capacity(imu_data.len());
@@ -22,8 +22,10 @@ pub struct PosePrediction {
     pub velocity: Vector3<f64>,
     // pub rotation: Vector3<f64>,
     pub delta_transform: Matrix4<f64>,
-    /// IMUから積分した回転量（重力除去なしのため並進は不正確）
+    /// IMUから積分した回転量（IMU座標系）
     pub delta_rotation: UnitQuaternion<f64>,
+    /// IMUから積分した回転量（LiDAR座標系に変換済み）
+    pub delta_rotation_in_lidar: UnitQuaternion<f64>,
 }
 
 const G: f64 = 9.80665;
@@ -38,6 +40,7 @@ pub fn predict_pose_by_imu(
         // rotation: Vector3::zeros(),
         delta_transform: Matrix4::identity(),
         delta_rotation: UnitQuaternion::identity(),
+        delta_rotation_in_lidar: UnitQuaternion::identity(),
     };
 
     // --- Find the imu data from previous start frame time to current start frame time ---
@@ -104,12 +107,21 @@ pub fn predict_pose_by_imu(
         .fixed_view_mut::<3, 1>(0, 3)
         .copy_from(&position);
 
+    // IMU座標系のdelta_rotationをLiDAR座標系に変換
+    // delta_rotation_in_lidar = R_imu_to_lidar * q * R_imu_to_lidar^{-1}
+    let (ix, iy, iz, iw) = IMU_TO_LIDAR;
+    let r_imu_to_lidar = UnitQuaternion::from_quaternion(
+        nalgebra::Quaternion::new(iw, ix, iy, iz)
+    );
+    let delta_rotation_in_lidar = r_imu_to_lidar * q * r_imu_to_lidar.inverse();
+
     PosePrediction {
         position,
         velocity,
         // rotation: q.euler_angles().into(),
         delta_transform,
         delta_rotation: q,
+        delta_rotation_in_lidar,
     }
 }
 
