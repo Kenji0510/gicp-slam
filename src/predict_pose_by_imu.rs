@@ -33,7 +33,8 @@ const G: f64 = 9.80665;
 pub fn predict_pose_by_imu(
     imu_data: &Vec<IMU>,
     frame_time_range: (f64, f64), // (start_time, end_time) sec
-    static_gravity_g: &Vector3<f64>,
+    imu_to_lidar: &UnitQuaternion<f64>,
+    prev_state: Option<&PosePrediction>,
 ) -> PosePrediction {
     let empty_result = PosePrediction {
         position: Vector3::zeros(),
@@ -42,6 +43,11 @@ pub fn predict_pose_by_imu(
         delta_transform: Matrix4::identity(),
         delta_rotation: UnitQuaternion::identity(),
     };
+
+    let mut rotation = prev_state.map(|s| s.delta_rotation).unwrap_or_default();
+    let mut velocity = prev_state.map(|s| s.velocity).unwrap_or_default();
+    let mut position = prev_state.map(|s| s.position).unwrap_or_default();
+    let gravity = Vector3::new(0.0, 0.0, G);
 
     // --- Find the imu data from previous start frame time to current start frame time ---
     let (start_idx, end_idx) = get_imu_range(imu_data, frame_time_range);
@@ -53,9 +59,6 @@ pub fn predict_pose_by_imu(
     let relevant_imu_data = &imu_data[start_idx..end_idx];
 
     let mut last_time = imu_data[start_idx - 1].timestamp; // Use the timestamp of the last IMU data point before the frame start
-    let mut q = UnitQuaternion::<f64>::identity();
-    let mut velocity = Vector3::<f64>::zeros();
-    let mut position = Vector3::<f64>::zeros();
 
     for sample in relevant_imu_data {
         let dt = sample.timestamp - last_time;
@@ -64,11 +67,12 @@ pub fn predict_pose_by_imu(
         }
 
         // --- Update rotation ---
-        let omega = Vector3::new(
+        let mut omega = Vector3::new(
             sample.angular_velocity[0] as f64,
             sample.angular_velocity[1] as f64,
             sample.angular_velocity[2] as f64,
         );
+        omega = imu_to_lidar * omega;
 
         let angle = omega.norm() * dt;
         let axis = if angle < 1e-9 {
@@ -78,7 +82,8 @@ pub fn predict_pose_by_imu(
         };
 
         let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
-        q = q * delta_q; // Update orientation (body-frame ω → right-compose)
+        rotation = rotation * delta_q;
+        rotation.renormalize();
 
         // --- Update velocity ---
         let acc = Vector3::new(
@@ -89,7 +94,8 @@ pub fn predict_pose_by_imu(
 
         // g単位→m/s²変換してワールドフレームへ回転し、重力を除去
         // static_gravity_g はワールドフレームの重力方向（初期ボディ=ワールド座標）
-        let acc_world = q * (acc * G) - static_gravity_g * G;
+        let acc_local = imu_to_lidar * (acc * G);
+        let acc_world = gravity - rotation * acc_local;
 
         // --- Update position and velocity ---
         velocity += acc_world * dt;
@@ -99,7 +105,7 @@ pub fn predict_pose_by_imu(
         last_time = sample.timestamp;
     }
 
-    let rotation_matrix = q.to_rotation_matrix();
+    let rotation_matrix = rotation.to_rotation_matrix();
     let mut delta_transform = Matrix4::<f64>::identity();
     delta_transform
         .fixed_view_mut::<3, 3>(0, 0)
@@ -113,7 +119,7 @@ pub fn predict_pose_by_imu(
         velocity,
         // rotation: q.euler_angles().into(),
         delta_transform,
-        delta_rotation: q,
+        delta_rotation: rotation,
     }
 }
 

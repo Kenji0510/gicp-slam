@@ -1,9 +1,7 @@
 use nalgebra::{Isometry3, Matrix3, Point3};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::compute_covariance::{
-    add_diagonal, invert_matrix3_safe, voxel_key, VoxelKey, VoxelMap,
-};
+use crate::compute_covariance::{VoxelKey, VoxelMap, add_diagonal, invert_matrix3_safe, voxel_key};
 
 #[derive(Debug, Clone)]
 pub struct GaussianCorrespondence {
@@ -136,25 +134,19 @@ pub fn find_gaussian_correspondences(
             }
 
             let transformed_source_mean = source_to_target.transform_point(&source_cell.mean);
-            let rotated_source_covariance =
-                r_mat * source_cell.covariance * r_mat.transpose();
+            let rotated_source_covariance = r_mat * source_cell.covariance * r_mat.transpose();
 
-            let (
-                target_key,
-                target_mean,
-                target_covariance,
-                euclidean_dist_sq,
-                mahalanobis_dist,
-            ) = find_nearest_target_gaussian(
-                &transformed_source_mean,
-                &rotated_source_covariance,
-                target_map,
-                gaussian_voxel_size,
-                search_range,
-                max_euclidean_dist_sq,
-                max_mahalanobis_dist,
-                covariance_regularization,
-            )?;
+            let (target_key, target_mean, target_covariance, euclidean_dist_sq, mahalanobis_dist) =
+                find_nearest_target_gaussian(
+                    &transformed_source_mean,
+                    &rotated_source_covariance,
+                    target_map,
+                    gaussian_voxel_size,
+                    search_range,
+                    max_euclidean_dist_sq,
+                    max_mahalanobis_dist,
+                    covariance_regularization,
+                )?;
 
             Some(GaussianCorrespondence {
                 source_key,

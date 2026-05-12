@@ -32,7 +32,6 @@ pub fn convert_voxel_map_to_pcd(voxel_map: &HashMap<VoxelKey, VoxelCell>) -> Vec
         //         cov_yz: cell.covariance[(1, 2)],
         //         cov_zz: cell.covariance[(2, 2)],
         //     })
-        
         // })
         // .flatten()
         .collect()

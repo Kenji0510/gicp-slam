@@ -55,8 +55,7 @@ pub fn compute_tilt_correction(gravity: &Vector3<f32>) -> UnitQuaternion<f32> {
         Vector3::new(0.0_f32, 0.0, -1.0)
     };
 
-    UnitQuaternion::rotation_between(&gravity_dir, &reference)
-        .unwrap_or(UnitQuaternion::identity())
+    UnitQuaternion::rotation_between(&gravity_dir, &reference).unwrap_or(UnitQuaternion::identity())
 }
 
 /// 点群に傾き補正回転を適用して水平化した点群を返す。

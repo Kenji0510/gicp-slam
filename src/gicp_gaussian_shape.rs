@@ -181,18 +181,10 @@ fn numerical_shape_jacobian_rotation(
         let cov_plus = r_plus * rotated_source_covariance * r_plus.transpose();
         let cov_minus = r_minus * rotated_source_covariance * r_minus.transpose();
 
-        let residual_plus = covariance_shape_residual(
-            target_covariance,
-            cov_plus,
-            normalize_by_trace,
-            min_trace,
-        );
-        let residual_minus = covariance_shape_residual(
-            target_covariance,
-            cov_minus,
-            normalize_by_trace,
-            min_trace,
-        );
+        let residual_plus =
+            covariance_shape_residual(target_covariance, cov_plus, normalize_by_trace, min_trace);
+        let residual_minus =
+            covariance_shape_residual(target_covariance, cov_minus, normalize_by_trace, min_trace);
 
         let col = (residual_plus - residual_minus) / (2.0 * eps);
         j.set_column(axis, &col);

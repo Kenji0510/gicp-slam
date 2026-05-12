@@ -5,7 +5,11 @@ use crate::{
     types::{IMU, PointXYZIT},
 };
 
-pub fn deskew_points(imu_data: &Vec<DeltaRotation>, pcd: &Vec<PointXYZIT>) -> Vec<Point3<f32>> {
+pub fn deskew_points(
+    imu_data: &Vec<DeltaRotation>,
+    imu_to_lidar: &UnitQuaternion<f64>,
+    pcd: &Vec<PointXYZIT>,
+) -> Vec<Point3<f32>> {
     let (start_time, end_time) = get_time_for_start_and_end(pcd);
 
     let (start_idx, end_idx) = get_imu_range(&imu_data, (start_time, end_time));
@@ -22,7 +26,7 @@ pub fn deskew_points(imu_data: &Vec<DeltaRotation>, pcd: &Vec<PointXYZIT>) -> Ve
         let rotation = get_rotation_at_time(relevant_imu_data, point_time);
 
         let point_vec = Point3::new(x, y, z);
-        let deskewed_point = rotation.cast::<f32>() * point_vec;
+        let deskewed_point = (imu_to_lidar * rotation).cast::<f32>() * point_vec;
         deskewed_point_vecs.push(deskewed_point);
     }
 

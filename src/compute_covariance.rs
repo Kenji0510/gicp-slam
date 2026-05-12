@@ -97,11 +97,7 @@ impl VoxelCell {
             return;
         };
 
-        let covariance = regularize_gaussian_covariance(
-            raw_covariance,
-            min_variance,
-            max_variance,
-        );
+        let covariance = regularize_gaussian_covariance(raw_covariance, min_variance, max_variance);
 
         let information_covariance = add_diagonal(covariance, information_regularization);
         let Some(information) = invert_matrix3_safe(information_covariance) else {
