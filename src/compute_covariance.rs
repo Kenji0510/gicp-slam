@@ -29,11 +29,6 @@ pub struct VoxelCell {
     /// 固有値clamp後の安定化済みGaussian共分散 Σ。
     pub covariance: Matrix3<f32>,
 
-    /// `covariance` の逆行列 Σ^-1。
-    /// 単体Gaussianの情報行列として使える。
-    /// registration時は通常、(Σ_t + RΣ_sR^T)^-1 を別途計算する。
-    pub information: Matrix3<f32>,
-
     /// Gaussianとしてregistrationに使えるだけの点数と数値安定性があるか。
     pub valid: bool,
 }
@@ -45,7 +40,6 @@ impl VoxelCell {
             mean: Point3::new(0.0, 0.0, 0.0),
             raw_covariance: Matrix3::identity(),
             covariance: Matrix3::identity(),
-            information: Matrix3::identity(),
             valid: false,
         }
     }
@@ -63,12 +57,9 @@ impl VoxelCell {
         true
     }
 
-    pub fn recompute_gaussian(
+    pub fn recompute_covariance(
         &mut self,
         min_points_per_gaussian: usize,
-        min_variance: f32,
-        max_variance: f32,
-        information_regularization: f32,
     ) {
         self.valid = false;
 
@@ -76,7 +67,7 @@ impl VoxelCell {
             self.mean = Point3::new(0.0, 0.0, 0.0);
             self.raw_covariance = Matrix3::identity();
             self.covariance = Matrix3::identity();
-            self.information = Matrix3::identity();
+            self.valid = false;
             return;
         }
 
@@ -85,7 +76,7 @@ impl VoxelCell {
         if self.points.len() < min_points_per_gaussian {
             self.raw_covariance = Matrix3::identity();
             self.covariance = Matrix3::identity();
-            self.information = Matrix3::identity();
+            self.valid = false;
             return;
         }
 
@@ -93,24 +84,14 @@ impl VoxelCell {
         else {
             self.raw_covariance = Matrix3::identity();
             self.covariance = Matrix3::identity();
-            self.information = Matrix3::identity();
-            return;
-        };
-
-        let covariance = regularize_gaussian_covariance(raw_covariance, min_variance, max_variance);
-
-        let information_covariance = add_diagonal(covariance, information_regularization);
-        let Some(information) = invert_matrix3_safe(information_covariance) else {
-            self.raw_covariance = raw_covariance;
-            self.covariance = covariance;
-            self.information = Matrix3::identity();
             self.valid = false;
             return;
         };
 
+        let covariance = regularize_gaussian_covariance(raw_covariance);
+
         self.raw_covariance = raw_covariance;
         self.covariance = covariance;
-        self.information = information;
         self.valid = true;
     }
 }
@@ -124,16 +105,6 @@ pub fn voxel_key(p: &Point3<f32>, voxel_size: f32) -> VoxelKey {
         iy: (p.y / voxel_size).floor() as i32,
         iz: (p.z / voxel_size).floor() as i32,
     }
-}
-
-#[inline]
-pub fn add_diagonal(mut m: Matrix3<f32>, value: f32) -> Matrix3<f32> {
-    if value > 0.0 {
-        m[(0, 0)] += value;
-        m[(1, 1)] += value;
-        m[(2, 2)] += value;
-    }
-    m
 }
 
 #[inline]
@@ -189,37 +160,32 @@ fn compute_raw_covariance_from_points(
 /// GICPの平面法線方向だけを強くする正則化とは違い、分布形状を残す。
 pub fn regularize_gaussian_covariance(
     cov: Matrix3<f32>,
-    min_variance: f32,
-    max_variance: f32,
 ) -> Matrix3<f32> {
-    if !is_finite_matrix3(&cov) {
-        return Matrix3::<f32>::identity() * min_variance;
-    }
-
     let eig = SymmetricEigen::new(cov);
     let mut d = Matrix3::<f32>::zeros();
 
-    for i in 0..3 {
-        let lambda = eig.eigenvalues[i];
-        let lambda = if lambda.is_finite() {
-            lambda.max(min_variance).min(max_variance)
-        } else {
-            min_variance
-        };
-        d[(i, i)] = lambda;
-    }
+    let eigen = SymmetricEigen::new(cov);
+    let rot = eigen.eigenvectors;
+    let mut vals = eigen.eigenvalues;
 
-    eig.eigenvectors * d * eig.eigenvectors.transpose()
+    let mut pairs: Vec<(f32, usize)> = vals.iter().cloned().enumerate().map(|(i, v)| (v, i)).collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    let min_idx = pairs[0].1;
+    vals[min_idx] = 1e-3;     // 法線方向を薄くする
+    vals[pairs[1].1] = 1.0;
+    vals[pairs[2].1] = 5.0;
+
+    // C = R * S * R^T
+    let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();
+    regularized_cov
 }
 
-pub fn build_gaussian_voxel_map(
+pub fn build_gicp_voxel_map(
     points: &[Point3<f32>],
     gaussian_voxel_size: f32,
     max_points_per_gaussian: usize,
     min_points_per_gaussian: usize,
-    min_variance: f32,
-    max_variance: f32,
-    information_regularization: f32,
 ) -> VoxelMap {
     let mut voxel_map = VoxelMap::new();
 
@@ -229,30 +195,21 @@ pub fn build_gaussian_voxel_map(
         cell.push_point(p, max_points_per_gaussian);
     }
 
-    recompute_all_gaussians(
+    recompute_all_covariance(
         &mut voxel_map,
         min_points_per_gaussian,
-        min_variance,
-        max_variance,
-        information_regularization,
     );
 
     voxel_map
 }
 
-pub fn recompute_all_gaussians(
+pub fn recompute_all_covariance(
     voxel_map: &mut VoxelMap,
     min_points_per_gaussian: usize,
-    min_variance: f32,
-    max_variance: f32,
-    information_regularization: f32,
 ) {
     voxel_map.par_iter_mut().for_each(|(_, cell)| {
-        cell.recompute_gaussian(
+        cell.recompute_covariance(
             min_points_per_gaussian,
-            min_variance,
-            max_variance,
-            information_regularization,
         );
     });
 }
@@ -269,11 +226,8 @@ pub fn recompute_gaussians_for_keys(
         .par_iter()
         .filter_map(|&key| {
             let mut cell = voxel_map.get(&key)?.clone();
-            cell.recompute_gaussian(
+            cell.recompute_covariance(
                 min_points_per_gaussian,
-                min_variance,
-                max_variance,
-                information_regularization,
             );
             Some((key, cell))
         })

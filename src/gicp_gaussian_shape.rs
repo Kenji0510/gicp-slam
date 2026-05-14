@@ -1,7 +1,7 @@
 use nalgebra::{Isometry3, Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 use rayon::prelude::*;
 
-use crate::compute_covariance::{add_diagonal, invert_matrix3_safe};
+use crate::compute_covariance::{invert_matrix3_safe};
 use crate::find_nearest_points::GaussianCorrespondence;
 
 pub type Matrix6f = SMatrix<f32, 6, 6>;

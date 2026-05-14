@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lidar_slam::{
-    compute_covariance::{build_gaussian_voxel_map, merge_points_into_gaussian_voxel_map},
+    compute_covariance::{build_gicp_voxel_map, merge_points_into_gaussian_voxel_map},
     convert_imu_data::convert_imu_data,
     convert_type::{convert_pcd_to_xyz, convert_xyz_to_pcd},
     debug::convert_voxel_map_to_pcd,
@@ -8,18 +8,18 @@ use lidar_slam::{
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
     },
-    find_nearest_points::find_gaussian_correspondences,
-    gicp_gaussian_shape::{
-        GaussianShapeOptions, compute_gaussian_shape_linear_system, solve_gaussian_delta,
-    },
+    // find_nearest_points::find_gaussian_correspondences,
+    // gicp_gaussian_shape::{
+    //     GaussianShapeOptions, compute_gaussian_shape_linear_system, solve_gaussian_delta,
+    // },
     predict_pose_by_imu::{align_imu_timestamps, predict_pose_by_imu},
     tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
     voxelization::voxel_downsample_points,
 };
 use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park05";
-const SAVE_DIR: &str = "data/output/debug/05112026";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05122026/exp01";
+const SAVE_DIR: &str = "data/output/debug/05122026";
 
 const GAUSSIAN_ITERATIONS: usize = 5;
 
@@ -90,16 +90,22 @@ fn main() -> Result<()> {
     let covariance_max_variance = 0.5_f32;
     let covariance_regularization = 1.0e-3_f32;
 
-    let mut target_voxel_map = build_gaussian_voxel_map(
+    let mut target_voxel_map = build_gicp_voxel_map(
         &downsampled_init_points,
         gaussian_voxel_size,
         max_points_per_gaussian,
         min_points_per_gaussian,
-        covariance_min_variance,
-        covariance_max_variance,
-        covariance_regularization,
     );
+
+    let final_pcd = convert_voxel_map_to_pcd(&target_voxel_map);
+    let save_file_path = format!(
+        "{}/target_map_v-{}.pcd",
+        SAVE_DIR, gaussian_voxel_size
+    );
+    save_pcd_xyzcov(&final_pcd, &save_file_path)?;
+    log::info!("Saved final Gaussian voxel map as PCD: {}", save_file_path);
     // --- Build initial Gaussian voxel map ---
+
     let mut source_to_target =
         Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
 
@@ -120,6 +126,24 @@ fn main() -> Result<()> {
 
         let frame_time_range = (prev_frame_time, source_pcd_start_time);
         let pose_prediction = predict_pose_by_imu(&imu_data, frame_time_range, &imu_to_lidar, None);
+        println!(
+            "IMU-predicted pose change: Δposition=({:.3}, {:.3}, {:.3}) m, Δrotation=({:.3}, {:.3}, {:.3}) rad",
+            pose_prediction.position.x,
+            pose_prediction.position.y,
+            pose_prediction.position.z,
+            pose_prediction.delta_rotation.euler_angles().0,
+            pose_prediction.delta_rotation.euler_angles().1,
+            pose_prediction.delta_rotation.euler_angles().2,
+        );
+
+        // IMU予測をsource_to_targetの初期値として反映する。
+        // delta_rotationはフレーム間の回転差分なので、前フレームのポーズに右から合成する。
+        // これにより最適化のinitial guessが改善し、収束が速く外れにくくなる。
+        let imu_delta_rotation = pose_prediction.delta_rotation.cast::<f32>();
+        source_to_target = source_to_target * Isometry3::from_parts(
+            Translation3::new(0.0, 0.0, 0.0),
+            imu_delta_rotation,
+        );
         // --- Predict pose by IMU ---
 
         // --- Deskew source pcd ---
@@ -130,212 +154,196 @@ fn main() -> Result<()> {
         let downsampled_points = voxel_downsample_points(&deskewed_points, downsample_voxel_size);
         // --- Downsample the deskewed point cloud ---
 
-        // // --- Tilt correction ---
-        // let frame_gravity = estimate_gravity_from_imu(&imu_data, source_pcd_start_time, 2.0);
-        // let tilt_correction = compute_tilt_correction(&frame_gravity);
-        // let downsampled_points = apply_tilt_correction(&downsampled_points, &tilt_correction);
-        // log::debug!(
-        //     "Frame {:>4}: tilt gravity=[{:.3},{:.3},{:.3}]",
-        //     i,
-        //     frame_gravity.x,
-        //     frame_gravity.y,
-        //     frame_gravity.z
-        // );
-        // // --- Tilt correction ---
-
         // --- Build source Gaussian voxel map ---
-        let source_voxel_map = build_gaussian_voxel_map(
+        let source_voxel_map = build_gicp_voxel_map(
             &downsampled_points,
             gaussian_voxel_size,
             max_points_per_gaussian,
             min_points_per_gaussian,
-            covariance_min_variance,
-            covariance_max_variance,
-            covariance_regularization,
         );
         // --- Build source Gaussian voxel map ---
 
         let last_good_pose = source_to_target;
         let mut last_num_correspondences = 0usize;
 
-        for i in 0..GAUSSIAN_ITERATIONS {
-            // --- find nearest points ---
-            let search_range = 3; // 3x3x3 voxels
-            let max_euclidean_dist_sq = Some(1.0_f32);
-            let max_mahalanobis_dist = Some(25.0_f32);
-            let correspondences = find_gaussian_correspondences(
-                &source_voxel_map,
-                &target_voxel_map,
-                gaussian_voxel_size,
-                &source_to_target,
-                search_range,
-                max_euclidean_dist_sq,
-                max_mahalanobis_dist,
-                covariance_regularization,
-            );
-            last_num_correspondences = correspondences.len();
+        // for i in 0..GAUSSIAN_ITERATIONS {
+        //     // --- find nearest points ---
+        //     let search_range = 5; // 3x3x3 voxels
+        //     let max_euclidean_dist_sq = Some(1.0_f32);
+        //     let max_mahalanobis_dist = Some(25.0_f32);
+        //     let correspondences = find_gaussian_correspondences(
+        //         &source_voxel_map,
+        //         &target_voxel_map,
+        //         gaussian_voxel_size,
+        //         &source_to_target,
+        //         search_range,
+        //         max_euclidean_dist_sq,
+        //         max_mahalanobis_dist,
+        //         covariance_regularization,
+        //     );
+        //     last_num_correspondences = correspondences.len();
 
-            if correspondences.is_empty() {
-                log::warn!(
-                    "Frame {}: No correspondences found at iteration {}, skipping frame",
-                    i,
-                    i
-                );
-                break;
-            }
+        //     if correspondences.is_empty() {
+        //         log::warn!(
+        //             "Frame {}: No correspondences found at iteration {}, skipping frame",
+        //             i,
+        //             i
+        //         );
+        //         break;
+        //     }
 
-            let mut dist = 0.0;
-            for c in &correspondences {
-                dist += c.euclidean_dist_sq;
-            }
-            log::debug!(
-                "Average euclidean distance of correspondences: {}",
-                dist / correspondences.len() as f32
-            );
-            // --- find nearest points ---
+        //     let mut dist = 0.0;
+        //     for c in &correspondences {
+        //         dist += c.euclidean_dist_sq;
+        //     }
+        //     log::debug!(
+        //         "Average euclidean distance of correspondences: {}",
+        //         dist / correspondences.len() as f32
+        //     );
+        //     // --- find nearest points ---
 
-            // --- compute Gaussian shape matching ---
-            // mean-to-mean項 + covariance shape-to-shape項。
-            let shape_options = GaussianShapeOptions {
-                mean_weight: 1.0,
-                shape_weight: 0.05,
-                covariance_regularization,
-                max_euclidean_dist_sq: max_euclidean_dist_sq.unwrap(),
-                max_mahalanobis_dist,
-                shape_fd_epsilon: 1.0e-3,
-                normalize_shape_by_trace: true,
-                min_trace: 1.0e-6,
-            };
+        //     // --- compute Gaussian shape matching ---
+        //     // mean-to-mean項 + covariance shape-to-shape項。
+        //     let shape_options = GaussianShapeOptions {
+        //         mean_weight: 1.0,
+        //         shape_weight: 0.05,
+        //         covariance_regularization,
+        //         max_euclidean_dist_sq: max_euclidean_dist_sq.unwrap(),
+        //         max_mahalanobis_dist,
+        //         shape_fd_epsilon: 1.0e-3,
+        //         normalize_shape_by_trace: true,
+        //         min_trace: 1.0e-6,
+        //     };
 
-            let system = compute_gaussian_shape_linear_system(
-                &correspondences,
-                &source_to_target,
-                &shape_options,
-            );
+        //     let system = compute_gaussian_shape_linear_system(
+        //         &correspondences,
+        //         &source_to_target,
+        //         &shape_options,
+        //     );
 
-            // H_ttの最小固有値 ≈ 0.5（壁接線方向）。1e-6では無効 → 0.1で抑制
-            let damping = 0.1;
+        //     // H_ttの最小固有値 ≈ 0.5（壁接線方向）。1e-6では無効 → 0.1で抑制
+        //     let damping = 0.1;
 
-            // Update source_to_target for the next iteration
-            if let Some(delta) = solve_gaussian_delta(&system, damping) {
-                // delta[0..3] = 回転（Lie代数ベクトル）, delta[3..6] = 並進
-                // 発散防止：deltaが大きすぎる場合はスケールダウン
-                let max_rot_norm = 0.1_f32; // rad
-                let max_trans_norm = 0.5_f32; // m
-                let rot_vec = nalgebra::Vector3::new(delta[0], delta[1], delta[2]);
-                let trans_vec = nalgebra::Vector3::new(delta[3], delta[4], delta[5]);
-                let rot_vec = if rot_vec.norm() > max_rot_norm {
-                    rot_vec.normalize() * max_rot_norm
-                } else {
-                    rot_vec
-                };
-                let trans_vec = if trans_vec.norm() > max_trans_norm {
-                    trans_vec.normalize() * max_trans_norm
-                } else {
-                    trans_vec
-                };
+        //     // Update source_to_target for the next iteration
+        //     if let Some(delta) = solve_gaussian_delta(&system, damping) {
+        //         // delta[0..3] = 回転（Lie代数ベクトル）, delta[3..6] = 並進
+        //         // 発散防止：deltaが大きすぎる場合はスケールダウン
+        //         let max_rot_norm = 0.1_f32; // rad
+        //         let max_trans_norm = 0.5_f32; // m
+        //         let rot_vec = nalgebra::Vector3::new(delta[0], delta[1], delta[2]);
+        //         let trans_vec = nalgebra::Vector3::new(delta[3], delta[4], delta[5]);
+        //         let rot_vec = if rot_vec.norm() > max_rot_norm {
+        //             rot_vec.normalize() * max_rot_norm
+        //         } else {
+        //             rot_vec
+        //         };
+        //         let trans_vec = if trans_vec.norm() > max_trans_norm {
+        //             trans_vec.normalize() * max_trans_norm
+        //         } else {
+        //             trans_vec
+        //         };
 
-                let angle = rot_vec.norm();
-                let rotation = if angle < 1.0e-10 {
-                    UnitQuaternion::identity()
-                } else {
-                    UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(rot_vec), angle)
-                };
-                let translation = Translation3::new(trans_vec.x, trans_vec.y, trans_vec.z);
-                let delta_isometry = Isometry3::from_parts(translation, rotation);
-                source_to_target = delta_isometry * source_to_target;
+        //         let angle = rot_vec.norm();
+        //         let rotation = if angle < 1.0e-10 {
+        //             UnitQuaternion::identity()
+        //         } else {
+        //             UnitQuaternion::from_axis_angle(&nalgebra::Unit::new_normalize(rot_vec), angle)
+        //         };
+        //         let translation = Translation3::new(trans_vec.x, trans_vec.y, trans_vec.z);
+        //         let delta_isometry = Isometry3::from_parts(translation, rotation);
+        //         source_to_target = delta_isometry * source_to_target;
 
-                let rot_norm = rot_vec.norm();
-                let trans_norm = trans_vec.norm();
-                log::debug!(
-                    "Gaussian iter {}: rot={:.4} rad, trans={:.4} m",
-                    i,
-                    rot_norm,
-                    trans_norm
-                );
-                if rot_norm < 1.0e-4 && trans_norm < 1.0e-4 {
-                    log::debug!("Gaussian converged at iteration {}", i);
-                    break;
-                }
-            } else {
-                log::warn!(
-                    "Gaussian failed to solve (insufficient correspondences) at iteration {}",
-                    i
-                );
-                break;
-            }
-            // --- compute GICP ---
-        }
+        //         let rot_norm = rot_vec.norm();
+        //         let trans_norm = trans_vec.norm();
+        //         log::debug!(
+        //             "Gaussian iter {}: rot={:.4} rad, trans={:.4} m",
+        //             i,
+        //             rot_norm,
+        //             trans_norm
+        //         );
+        //         if rot_norm < 1.0e-4 && trans_norm < 1.0e-4 {
+        //             log::debug!("Gaussian converged at iteration {}", i);
+        //             break;
+        //         }
+        //     } else {
+        //         log::warn!(
+        //             "Gaussian failed to solve (insufficient correspondences) at iteration {}",
+        //             i
+        //         );
+        //         break;
+        //     }
+        //     // --- compute GICP ---
+        // }
 
-        // 発散チェック：1フレームで1m以上動いたら棄却
-        let translation_diff =
-            (source_to_target.translation.vector - last_good_pose.translation.vector).norm();
-        let proposed_tx = source_to_target.translation.x;
-        let proposed_ty = source_to_target.translation.y;
-        let proposed_tz = source_to_target.translation.z;
-        let (r, p, y) = source_to_target.rotation.euler_angles();
-        log::info!(
-            "Frame {:>4}: trans_diff={:.4}m  pose=({:.3},{:.3},{:.3})  rot_rpy=({:.3},{:.3},{:.3})",
-            i,
-            translation_diff,
-            source_to_target.translation.x,
-            source_to_target.translation.y,
-            source_to_target.translation.z,
-            r,
-            p,
-            y,
-        );
+        // // 発散チェック：1フレームで1m以上動いたら棄却
+        // let translation_diff =
+        //     (source_to_target.translation.vector - last_good_pose.translation.vector).norm();
+        // let proposed_tx = source_to_target.translation.x;
+        // let proposed_ty = source_to_target.translation.y;
+        // let proposed_tz = source_to_target.translation.z;
+        // let (r, p, y) = source_to_target.rotation.euler_angles();
+        // log::info!(
+        //     "Frame {:>4}: trans_diff={:.4}m  pose=({:.3},{:.3},{:.3})  rot_rpy=({:.3},{:.3},{:.3})",
+        //     i,
+        //     translation_diff,
+        //     source_to_target.translation.x,
+        //     source_to_target.translation.y,
+        //     source_to_target.translation.z,
+        //     r,
+        //     p,
+        //     y,
+        // );
 
-        if translation_diff > 1.0 {
-            log::warn!(
-                "Frame {}: Gaussian diverged ({:.4}m), reverting pose and skipping map update",
-                i,
-                translation_diff
-            );
-            source_to_target = last_good_pose;
-            consecutive_skip_count += 1;
-        } else {
-            // --- Update target_voxel_map for the next frame ---
-            merge_points_into_gaussian_voxel_map(
-                &mut target_voxel_map,
-                &downsampled_points,
-                &source_to_target,
-                gaussian_voxel_size,
-                max_points_per_gaussian,
-                min_points_per_gaussian,
-                covariance_min_variance,
-                covariance_max_variance,
-                covariance_regularization,
-            );
-            if consecutive_skip_count >= MAX_CONSECUTIVE_SKIPS {
-                log::warn!(
-                    "Frame {}: forced map update after {} consecutive skips",
-                    i,
-                    consecutive_skip_count
-                );
-            }
-            consecutive_skip_count = 0;
-            log::debug!(
-                "Frame {}: Map updated. pose = {:?}",
-                i,
-                source_to_target.translation
-            );
-            //  --- Update target_voxel_map for the next frame ---
-        }
+        // if translation_diff > 1.0 {
+        //     log::warn!(
+        //         "Frame {}: Gaussian diverged ({:.4}m), reverting pose and skipping map update",
+        //         i,
+        //         translation_diff
+        //     );
+        //     source_to_target = last_good_pose;
+        //     consecutive_skip_count += 1;
+        // } else {
+        //     // --- Update target_voxel_map for the next frame ---
+        //     merge_points_into_gaussian_voxel_map(
+        //         &mut target_voxel_map,
+        //         &downsampled_points,
+        //         &source_to_target,
+        //         gaussian_voxel_size,
+        //         max_points_per_gaussian,
+        //         min_points_per_gaussian,
+        //         covariance_min_variance,
+        //         covariance_max_variance,
+        //         covariance_regularization,
+        //     );
+        //     if consecutive_skip_count >= MAX_CONSECUTIVE_SKIPS {
+        //         log::warn!(
+        //             "Frame {}: forced map update after {} consecutive skips",
+        //             i,
+        //             consecutive_skip_count
+        //         );
+        //     }
+        //     consecutive_skip_count = 0;
+        //     log::debug!(
+        //         "Frame {}: Map updated. pose = {:?}",
+        //         i,
+        //         source_to_target.translation
+        //     );
+        //     //  --- Update target_voxel_map for the next frame ---
+        // }
 
-        pose_log.push(serde_json::json!({
-            "frame":              i,
-            "timestamp":          source_pcd_start_time,
-            "proposed_tx":        proposed_tx,
-            "proposed_ty":        proposed_ty,
-            "proposed_tz":        proposed_tz,
-            "proposed_roll":      r,
-            "proposed_pitch":     p,
-            "proposed_yaw":       y,
-            "translation_diff":   translation_diff,
-            "consecutive_skips":  consecutive_skip_count,
-            "num_correspondences":last_num_correspondences,
-        }));
+        // pose_log.push(serde_json::json!({
+        //     "frame":              i,
+        //     "timestamp":          source_pcd_start_time,
+        //     "proposed_tx":        proposed_tx,
+        //     "proposed_ty":        proposed_ty,
+        //     "proposed_tz":        proposed_tz,
+        //     "proposed_roll":      r,
+        //     "proposed_pitch":     p,
+        //     "proposed_yaw":       y,
+        //     "translation_diff":   translation_diff,
+        //     "consecutive_skips":  consecutive_skip_count,
+        //     "num_correspondences":last_num_correspondences,
+        // }));
 
         prev_frame_time = source_pcd_start_time; // 次フレームのIMU積分の開始時刻を更新
     }

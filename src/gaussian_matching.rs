@@ -1,7 +1,7 @@
 use nalgebra::{Isometry3, Matrix3, SMatrix, SVector, Vector3};
 use rayon::prelude::*;
 
-use crate::compute_covariance::{add_diagonal, invert_matrix3_safe};
+use crate::compute_covariance::{invert_matrix3_safe};
 use crate::find_nearest_points::GaussianCorrespondence;
 
 pub type Matrix6f = SMatrix<f32, 6, 6>;
@@ -51,10 +51,7 @@ fn compute_one_gaussian_term(
     let pt = corr.target_mean;
 
     let source_covariance = r_mat * corr.source_covariance * r_mat.transpose();
-    let c_sum = add_diagonal(
-        corr.target_covariance + source_covariance,
-        covariance_regularization,
-    );
+    let c_sum = corr.target_covariance + source_covariance;
     let omega = invert_matrix3_safe(c_sum)?;
 
     // error = target - transformed_source

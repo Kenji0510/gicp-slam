@@ -26,7 +26,8 @@ pub fn deskew_points(
         let rotation = get_rotation_at_time(relevant_imu_data, point_time);
 
         let point_vec = Point3::new(x, y, z);
-        let deskewed_point = (imu_to_lidar * rotation).cast::<f32>() * point_vec;
+        let correction = imu_to_lidar * rotation * imu_to_lidar.inverse();
+        let deskewed_point = correction.cast::<f32>() * point_vec;
         deskewed_point_vecs.push(deskewed_point);
     }
 
