@@ -353,33 +353,48 @@ pub fn merge_points_into_gaussian_voxel_map(
         }
     }
 
-    // Mean
-    for cell in map.values_mut() {
-        cell.mean = cell.compute_average();
+    if modified_keys.is_empty() {
+        return;
     }
 
-    // Covariance
-    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = map
-        .keys()
-        .cloned()
+    // Mean: 変更されたvoxelのみ再計算
+    for key in &modified_keys {
+        if let Some(cell) = map.get_mut(key) {
+            cell.mean = cell.compute_average();
+        }
+    }
+
+    // Covariance: 変更voxel + その隣接voxelのみ再計算
+    // (あるvoxelのmeanが変わると、そのvoxelを隣接に持つ全voxelの共分散も変わる)
+    let keys_to_update: HashSet<VoxelKey> = modified_keys
+        .iter()
+        .flat_map(|key| {
+            let mut ks: Vec<VoxelKey> = neighbor_keys(key).into_iter().collect();
+            ks.push(*key);
+            ks
+        })
+        .filter(|key| map.contains_key(key))
+        .collect();
+
+    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = keys_to_update
+        .into_iter()
         .map(|key| {
-            let neighbor_means_point: Vec<Point3<f32>> = neighbor_keys(&key)
+            let neighbor_means: Vec<Point3<f32>> = neighbor_keys(&key)
                 .into_iter()
-                .filter_map(|neighbor_key| map.get(&neighbor_key))
+                .filter_map(|nk| map.get(&nk))
                 .map(|cell| cell.mean)
                 .collect();
-            (key, neighbor_means_point)
+            (key, neighbor_means)
         })
         .collect();
 
-    for (key, neighbor_means_point) in keys_and_neighbors {
-        if neighbor_means_point.len() < min_points_per_voxel {
+    for (key, neighbor_means) in keys_and_neighbors {
+        if neighbor_means.len() < min_points_per_voxel {
             continue;
         }
         if let Some(cell) = map.get_mut(&key) {
             let mean = cell.mean;
-            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means_point, &mean)
-            {
+            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means, &mean) {
                 cell.raw_covariance = raw_cov;
                 cell.covariance = regularize_gicp_covariance(raw_cov);
                 cell.valid = true;

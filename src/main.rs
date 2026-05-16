@@ -8,7 +8,7 @@ use lidar_slam::{
     compute_gicp::{compute_gicp_linear_system, solve_gicp},
     convert_imu_data::convert_imu_data,
     convert_type::{convert_pcd_to_xyz, convert_xyz_to_pcd},
-    debug::{DebugData, convert_voxel_map_to_pcd},
+    debug::{DebugData, DebugProcessTime, convert_voxel_map_to_pcd},
     deskew_points::deskew_points,
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
@@ -71,6 +71,7 @@ fn main() -> Result<()> {
     println!("{}", imu_data[0].timestamp);
 
     let mut debug_data: Vec<DebugData> = Vec::new();
+    let mut debug_process_times: Vec<DebugProcessTime> = Vec::new();
 
     // IMU coord to LiDAR coord transformation
     let imu_to_lidar = UnitQuaternion::new_normalize(Quaternion::new(
@@ -156,24 +157,31 @@ fn main() -> Result<()> {
         // --- Deskew source pcd --- 05132026
 
         // --- Downsample the deskewed point cloud ---
+        let start = std::time::Instant::now();
         let downsampled_points = voxel_downsample_points(&deskewed_points, downsample_voxel_size);
+        let voxelization_time_ms = start.elapsed().as_secs_f32() * 1000.0;
         // --- Downsample the deskewed point cloud ---
 
         let mut current_transform = pose_prediction.0;
 
         // --- Build source Voxel voxel map ---
+        let start = std::time::Instant::now();
         let source_voxel_map = build_gicp_voxel_map(
             &downsampled_points,
             downsample_voxel_size,
             MAX_POINTS_PER_VOXEL,
             MIN_POINTS_PER_VOXEL,
         );
+        let create_voxel_map_time_ms = start.elapsed().as_secs_f32() * 1000.0;
         // --- Build source Voxel voxel map ---
 
         let mut dist = 0.0;
         let mut cnt = 0usize;
         let mut correspondence_num: usize = 0;
 
+        let start = std::time::Instant::now();
+        let mut find_nearest_time_ms = 0.0f32;
+        let mut gicp_time_ms = 0.0f32;
         for i in 0..GICP_ITERATIONS {
             // --- Transform source voxel map to global frame ---
             let transformed_source_voxel_map =
@@ -181,6 +189,7 @@ fn main() -> Result<()> {
             // --- Transform source voxel map to global frame ---
 
             // --- find nearest points ---
+            let start_find = std::time::Instant::now();
             let correspondences = find_nearest_voxels(
                 &transformed_source_voxel_map,
                 &target_voxel_map,
@@ -188,6 +197,7 @@ fn main() -> Result<()> {
                 SEARCH_RANGE,
                 Some(MAX_DIST_SQ),
             );
+            find_nearest_time_ms += start_find.elapsed().as_secs_f32() * 1000.0;
             // --- find nearest points ---
 
             // --- DEBUG ---
@@ -213,10 +223,12 @@ fn main() -> Result<()> {
 
 
             // --- compute GICP ---
+            let start_gicp = std::time::Instant::now();
             let gicp_result = compute_gicp_linear_system(&correspondences);
             if let Some(delta) = solve_gicp(&gicp_result, 1.0e-4) {
                 current_transform = delta * current_transform;
             }
+            gicp_time_ms += start_gicp.elapsed().as_secs_f32() * 1000.0;
             // --- compute GICP ---
         }
 
@@ -226,6 +238,7 @@ fn main() -> Result<()> {
         });
 
         // --- Update target_voxel_map for the next frame ---
+        let start = std::time::Instant::now();
         merge_points_into_gaussian_voxel_map(
             &mut target_voxel_map,
             &downsampled_points,
@@ -234,7 +247,17 @@ fn main() -> Result<()> {
             MAX_POINTS_PER_VOXEL,
             MIN_POINTS_PER_VOXEL,
         );
+        let merge_time_ms = start.elapsed().as_secs_f32() * 1000.0;
         // --- Update target_voxel_map for the next frame ---
+
+        debug_process_times.push(DebugProcessTime {
+            voxelization_time_ms,
+            create_voxel_map_time_ms,
+            find_correspondences_time_ms: find_nearest_time_ms / GICP_ITERATIONS as f32,
+            gicp_time_ms: gicp_time_ms / GICP_ITERATIONS as f32,
+            total_gicp_time_ms: (find_nearest_time_ms + gicp_time_ms) / GICP_ITERATIONS as f32,
+            merge_time_ms,
+        });
 
         // GICP補正後の位置差分から速度を推定（IMU積分のバイアス蓄積を避ける）
         let prev_pos = current_global_pose.fixed_view::<3, 1>(0, 3).into_owned();
@@ -255,9 +278,13 @@ fn main() -> Result<()> {
     log::info!("Saved final GICP voxel map as PCD: {}", save_file_path);
 
     // --- Save debug_data as JSON ---
-    let debug_log_path = format!("{}/debug_data.json", SAVE_DIR);
+    let debug_log_path = format!("{}/debug_gicp_data.json", SAVE_DIR);
     std::fs::write(&debug_log_path, serde_json::to_string_pretty(&debug_data)?)?;
     log::info!("Saved debug data ({} frames): {}", debug_data.len(), debug_log_path);
+
+    let debug_log_path = format!("{}/debug_process_times.json", SAVE_DIR);
+    std::fs::write(&debug_log_path, serde_json::to_string_pretty(&debug_process_times)?)?;
+    log::info!("Saved debug process times ({} frames): {}", debug_process_times.len(), debug_log_path);
     // --- Save debug_data as JSON ---
 
     Ok(())

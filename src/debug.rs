@@ -44,3 +44,14 @@ pub struct DebugData {
     pub correspondences_num: usize,
     pub dist: f32,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DebugProcessTime {
+    pub voxelization_time_ms: f32,
+    // pub covariance_time_ms: f32,
+    pub create_voxel_map_time_ms: f32,
+    pub find_correspondences_time_ms: f32,
+    pub total_gicp_time_ms: f32,
+    pub gicp_time_ms: f32,
+    pub merge_time_ms: f32,
+}
