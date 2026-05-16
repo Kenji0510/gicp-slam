@@ -206,6 +206,8 @@ fn main() -> Result<()> {
         // --- Update target_voxel_map for the next frame ---
 
         prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
+        current_global_pose = current_transform;
+        current_velocity = pose_prediction.1;
     }
 
     // --- Debug: Save final voxel map as PCD ---
