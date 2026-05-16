@@ -1,4 +1,4 @@
-use nalgebra::{Isometry3, Matrix3, Point3, SymmetricEigen, Vector3};
+use nalgebra::{Isometry3, Matrix3, Matrix4, Point3, SymmetricEigen, Vector3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
@@ -31,6 +31,8 @@ pub struct VoxelCell {
 
     /// Gaussianとしてregistrationに使えるだけの点数と数値安定性があるか。
     pub valid: bool,
+
+    pub voxel_key: VoxelKey,
 }
 
 impl VoxelCell {
@@ -41,6 +43,11 @@ impl VoxelCell {
             raw_covariance: Matrix3::identity(),
             covariance: Matrix3::identity(),
             valid: false,
+            voxel_key: VoxelKey {
+                ix: 0,
+                iy: 0,
+                iz: 0,
+            },
         }
     }
 
@@ -56,6 +63,12 @@ impl VoxelCell {
         self.points.push(p);
         true
     }
+
+    pub fn compute_average(&self) -> Point3<f32> {
+        compute_mean_from_points(&self.points)
+    }
+
+    pub fn compute_covariance(cell: &VoxelCell) {}
 
     pub fn recompute_covariance(&mut self, min_points_per_gaussian: usize) {
         self.valid = false;
@@ -85,7 +98,7 @@ impl VoxelCell {
             return;
         };
 
-        let covariance = regularize_gaussian_covariance(raw_covariance);
+        let covariance = regularize_gicp_covariance(raw_covariance);
 
         self.raw_covariance = raw_covariance;
         self.covariance = covariance;
@@ -132,6 +145,24 @@ fn compute_mean_from_points(points: &[Point3<f32>]) -> Point3<f32> {
     Point3::from(sum / points.len() as f32)
 }
 
+fn neighbor_keys(key: &VoxelKey) -> impl IntoIterator<Item = VoxelKey> {
+    let mut neighbors = Vec::with_capacity(27);
+
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                neighbors.push(VoxelKey {
+                    ix: key.ix + dx,
+                    iy: key.iy + dy,
+                    iz: key.iz + dz,
+                });
+            }
+        }
+    }
+
+    neighbors
+}
+
 fn compute_raw_covariance_from_points(
     points: &[Point3<f32>],
     mean: &Point3<f32>,
@@ -141,21 +172,22 @@ fn compute_raw_covariance_from_points(
     }
 
     let mut cov = Matrix3::<f32>::zeros();
-
     for p in points {
-        let d = p.coords - mean.coords;
+        let d = p - mean;
         cov += d * d.transpose();
     }
-
-    // 標本共分散。voxel内点数が少ない場合に過小評価しにくい。
     cov /= (points.len() - 1) as f32;
+
+    if !is_finite_matrix3(&cov) {
+        return None;
+    }
 
     Some(cov)
 }
 
 /// Gaussian covarianceとして使うため、固有値を範囲内にclampする。
 /// GICPの平面法線方向だけを強くする正則化とは違い、分布形状を残す。
-pub fn regularize_gaussian_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
+pub fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
     let eig = SymmetricEigen::new(cov);
     let mut d = Matrix3::<f32>::zeros();
 
@@ -184,18 +216,51 @@ pub fn regularize_gaussian_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
 pub fn build_gicp_voxel_map(
     points: &[Point3<f32>],
     gaussian_voxel_size: f32,
-    max_points_per_gaussian: usize,
-    min_points_per_gaussian: usize,
+    max_points_per_voxel: usize,
+    min_points_per_voxel: usize,
 ) -> VoxelMap {
     let mut voxel_map = VoxelMap::new();
 
     for &p in points {
         let key = voxel_key(&p, gaussian_voxel_size);
         let cell = voxel_map.entry(key).or_insert_with(VoxelCell::new);
-        cell.push_point(p, max_points_per_gaussian);
+        cell.push_point(p, max_points_per_voxel);
     }
 
-    recompute_all_covariance(&mut voxel_map, min_points_per_gaussian);
+    // recompute_all_covariance(&mut voxel_map, min_points_per_voxel);
+    // Mean
+    for cell in voxel_map.values_mut() {
+        cell.mean = cell.compute_average();
+    }
+
+    // Covariance
+    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = voxel_map
+        .keys()
+        .cloned()
+        .map(|key| {
+            let neighbor_means_point: Vec<Point3<f32>> = neighbor_keys(&key)
+                .into_iter()
+                .filter_map(|neighbor_key| voxel_map.get(&neighbor_key))
+                .map(|cell| cell.mean)
+                .collect();
+            (key, neighbor_means_point)
+        })
+        .collect();
+
+    for (key, neighbor_means_point) in keys_and_neighbors {
+        if neighbor_means_point.len() < min_points_per_voxel {
+            continue;
+        }
+        if let Some(cell) = voxel_map.get_mut(&key) {
+            let mean = cell.mean;
+            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means_point, &mean)
+            {
+                cell.raw_covariance = raw_cov;
+                cell.covariance = regularize_gicp_covariance(raw_cov);
+                cell.valid = true;
+            }
+        }
+    }
 
     voxel_map
 }
@@ -230,6 +295,44 @@ pub fn recompute_gaussians_for_keys(
     }
 }
 
+/// VoxelMap に剛体変換を適用して新しい VoxelMap を返す。
+/// - mean:       R * p + t
+/// - covariance: R * Σ * R^T
+/// - points:     R * p + t (各点)
+/// voxel_key はtransform後の mean から再計算する。
+pub fn transform_voxel_map(map: &VoxelMap, pose: &Matrix4<f64>, voxel_size: f32) -> VoxelMap {
+    let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
+    let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
+
+    let mut new_map = VoxelMap::new();
+
+    for cell in map.values() {
+        let new_mean = Point3::from(rot * cell.mean.coords + trans);
+        let new_covariance = rot * cell.covariance * rot.transpose();
+        let new_raw_covariance = rot * cell.raw_covariance * rot.transpose();
+        let new_points = cell
+            .points
+            .iter()
+            .map(|p| Point3::from(rot * p.coords + trans))
+            .collect();
+        let new_key = voxel_key(&new_mean, voxel_size);
+
+        new_map.insert(
+            new_key,
+            VoxelCell {
+                points: new_points,
+                mean: new_mean,
+                raw_covariance: new_raw_covariance,
+                covariance: new_covariance,
+                valid: cell.valid,
+                voxel_key: new_key,
+            },
+        );
+    }
+
+    new_map
+}
+
 /// 変換済み点群を既存のGaussian voxel mapに追加する。
 ///
 /// Gaussian版では「1 voxel = 1 Gaussian」なので、GICP版のように周辺3x3x3を
@@ -237,7 +340,7 @@ pub fn recompute_gaussians_for_keys(
 pub fn merge_points_into_gaussian_voxel_map(
     map: &mut VoxelMap,
     points: &[Point3<f32>],
-    pose: &Isometry3<f32>,
+    pose: &Matrix4<f64>,
     gaussian_voxel_size: f32,
     max_points_per_gaussian: usize,
     min_points_per_gaussian: usize,
@@ -245,10 +348,13 @@ pub fn merge_points_into_gaussian_voxel_map(
     max_variance: f32,
     information_regularization: f32,
 ) {
+    let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
+    let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
+
     let mut modified_keys = HashSet::<VoxelKey>::new();
 
     for p in points {
-        let transformed = pose.transform_point(p);
+        let transformed = Point3::from(rot * p.coords + trans);
         let key = voxel_key(&transformed, gaussian_voxel_size);
         let cell = map.entry(key).or_insert_with(VoxelCell::new);
 
