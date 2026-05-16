@@ -227,38 +227,34 @@ pub fn build_gicp_voxel_map(
         cell.push_point(p, max_points_per_voxel);
     }
 
-    // recompute_all_covariance(&mut voxel_map, min_points_per_voxel);
-    // Mean
-    for cell in voxel_map.values_mut() {
+    // Mean (parallel)
+    voxel_map.par_iter_mut().for_each(|(_, cell)| {
         cell.mean = cell.compute_average();
-    }
+    });
 
-    // Covariance
-    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = voxel_map
-        .keys()
-        .cloned()
-        .map(|key| {
-            let neighbor_means_point: Vec<Point3<f32>> = neighbor_keys(&key)
+    // Covariance: 近傍voxelの平均を収集して共分散を一括並列計算
+    let updates: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>)> = voxel_map
+        .par_iter()
+        .filter_map(|(key, cell)| {
+            let neighbor_means: Vec<Point3<f32>> = neighbor_keys(key)
                 .into_iter()
-                .filter_map(|neighbor_key| voxel_map.get(&neighbor_key))
-                .map(|cell| cell.mean)
+                .filter_map(|nk| voxel_map.get(&nk))
+                .map(|c| c.mean)
                 .collect();
-            (key, neighbor_means_point)
+            if neighbor_means.len() < min_points_per_voxel {
+                return None;
+            }
+            let raw_cov = compute_raw_covariance_from_points(&neighbor_means, &cell.mean)?;
+            let cov = regularize_gicp_covariance(raw_cov);
+            Some((*key, raw_cov, cov))
         })
         .collect();
 
-    for (key, neighbor_means_point) in keys_and_neighbors {
-        if neighbor_means_point.len() < min_points_per_voxel {
-            continue;
-        }
+    for (key, raw_cov, cov) in updates {
         if let Some(cell) = voxel_map.get_mut(&key) {
-            let mean = cell.mean;
-            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means_point, &mean)
-            {
-                cell.raw_covariance = raw_cov;
-                cell.covariance = regularize_gicp_covariance(raw_cov);
-                cell.valid = true;
-            }
+            cell.raw_covariance = raw_cov;
+            cell.covariance = cov;
+            cell.valid = true;
         }
     }
 
@@ -304,33 +300,30 @@ pub fn transform_voxel_map(map: &VoxelMap, pose: &Matrix4<f64>, voxel_size: f32)
     let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
     let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
 
-    let mut new_map = VoxelMap::new();
-
-    for cell in map.values() {
-        let new_mean = Point3::from(rot * cell.mean.coords + trans);
-        let new_covariance = rot * cell.covariance * rot.transpose();
-        let new_raw_covariance = rot * cell.raw_covariance * rot.transpose();
-        let new_points = cell
-            .points
-            .iter()
-            .map(|p| Point3::from(rot * p.coords + trans))
-            .collect();
-        let new_key = voxel_key(&new_mean, voxel_size);
-
-        new_map.insert(
-            new_key,
-            VoxelCell {
-                points: new_points,
-                mean: new_mean,
-                raw_covariance: new_raw_covariance,
-                covariance: new_covariance,
-                valid: cell.valid,
-                voxel_key: new_key,
-            },
-        );
-    }
-
-    new_map
+    map.par_iter()
+        .map(|(_, cell)| {
+            let new_mean = Point3::from(rot * cell.mean.coords + trans);
+            let new_covariance = rot * cell.covariance * rot.transpose();
+            let new_raw_covariance = rot * cell.raw_covariance * rot.transpose();
+            let new_points = cell
+                .points
+                .iter()
+                .map(|p| Point3::from(rot * p.coords + trans))
+                .collect();
+            let new_key = voxel_key(&new_mean, voxel_size);
+            (
+                new_key,
+                VoxelCell {
+                    points: new_points,
+                    mean: new_mean,
+                    raw_covariance: new_raw_covariance,
+                    covariance: new_covariance,
+                    valid: cell.valid,
+                    voxel_key: new_key,
+                },
+            )
+        })
+        .collect()
 }
 
 /// 変換済み点群を既存のGaussian voxel mapに追加する。

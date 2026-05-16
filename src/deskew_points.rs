@@ -1,4 +1,5 @@
 use nalgebra::{Point3, Unit, UnitQuaternion, Vector3};
+use rayon::prelude::*;
 
 use crate::{
     convert_imu_data::DeltaRotation,
@@ -14,37 +15,22 @@ pub fn deskew_points(
     min_dist: f32,
     max_dist: f32,
 ) -> Vec<Point3<f32>> {
-    let n_points = pcd.len();
-    let mut deskewed_points = Vec::<Point3<f32>>::with_capacity(n_points);
-
     let start_rotation = get_rotation_at_time(trajectory, frame_min_time);
     let start_rotation_inv = start_rotation.inverse();
 
-    for p in pcd {
-        let x = p.x;
-        let y = p.y;
-        let z = p.z;
-
-        let dist_sq = x * x + y * y + z * z;
-        if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
-            continue;
-        }
-
-        let timestamp = p.timestamp;
-        let current_rotation = get_rotation_at_time(trajectory, timestamp);
-
-        let relative_rotation = start_rotation_inv * current_rotation;
-
-        let p_vec = Vector3::new(p.x as f64, p.y as f64, p.z as f64);
-        let deskewed_p_vec = relative_rotation * (imu_to_lidar * p_vec);
-        deskewed_points.push(Point3::new(
-            deskewed_p_vec.x as f32,
-            deskewed_p_vec.y as f32,
-            deskewed_p_vec.z as f32,
-        ));
-    }
-
-    deskewed_points
+    pcd.par_iter()
+        .filter_map(|p| {
+            let dist_sq = p.x * p.x + p.y * p.y + p.z * p.z;
+            if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
+                return None;
+            }
+            let current_rotation = get_rotation_at_time(trajectory, p.timestamp);
+            let relative_rotation = start_rotation_inv * current_rotation;
+            let p_vec = Vector3::new(p.x as f64, p.y as f64, p.z as f64);
+            let deskewed = relative_rotation * (imu_to_lidar * p_vec);
+            Some(Point3::new(deskewed.x as f32, deskewed.y as f32, deskewed.z as f32))
+        })
+        .collect()
 }
 
 fn get_time_for_start_and_end(pcd: &Vec<PointXYZIT>) -> (f64, f64) {

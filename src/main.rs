@@ -26,7 +26,7 @@ const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05
 const SAVE_DIR: &str = "data/output/debug/05162026";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
-const GICP_ITERATIONS: usize = 5;
+const GICP_ITERATIONS: usize = 7;
 
 const MIN_DIST: f32 = 0.2;
 const MAX_DIST: f32 = 48.0;
@@ -34,7 +34,7 @@ const MAX_DIST: f32 = 48.0;
 const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
-const SEARCH_RANGE: i32 = 4; // Range of 7x7x7 voxels
+const SEARCH_RANGE: i32 = 3; // Range of 7x7x7 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)

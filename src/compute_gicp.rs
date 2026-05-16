@@ -1,6 +1,7 @@
 use std::ops::AddAssign;
 
 use nalgebra::{Matrix3, Matrix4, Matrix6, UnitQuaternion, Vector3, Vector6};
+use rayon::prelude::*;
 
 use crate::find_nearest_points::Correspondence;
 
@@ -23,52 +24,51 @@ fn skew(v: &Vector3<f32>) -> Matrix3<f32> {
 ///
 /// source/target のボクセルはすでにグローバル座標に変換済みであること。
 pub fn compute_gicp_linear_system(correspondences: &[Correspondence]) -> GicpLinearSystem {
-    let mut h = Matrix6::<f32>::zeros();
-    let mut b = Vector6::<f32>::zeros();
+    let (h, b) = correspondences
+        .par_iter()
+        .fold(
+            || (Matrix6::<f32>::zeros(), Vector6::<f32>::zeros()),
+            |(mut h, mut b), corr| {
+                let ps = corr.source_cell.mean.coords;
+                let pt = corr.target_cell.mean.coords;
+                let cs = corr.source_cell.covariance;
+                let ct = corr.target_cell.covariance;
 
-    for corr in correspondences {
-        let ps = corr.source_cell.mean.coords; // Vector3<f32>
-        let pt = corr.target_cell.mean.coords; // Vector3<f32>
-        let cs = corr.source_cell.covariance; // Matrix3<f32>
-        let ct = corr.target_cell.covariance; // Matrix3<f32>
+                let c_sum = ct + cs;
+                let Some(omega) = c_sum.try_inverse() else {
+                    return (h, b);
+                };
 
-        // C_sum = C_t + C_s,  Omega = C_sum^{-1}
-        let c_sum = ct + cs;
-        let Some(omega) = c_sum.try_inverse() else {
-            continue;
-        };
+                let err = pt - ps;
+                let we = omega * err;
 
-        // err = p_t - p_s,  We = Ω err
-        let err = pt - ps;
-        let we = omega * err;
+                let b_rot = ps.cross(&we);
+                let b_trans = we;
+                b.fixed_rows_mut::<3>(0).add_assign(b_rot);
+                b.fixed_rows_mut::<3>(3).add_assign(b_trans);
 
-        // b = [p_s × We ; We]
-        let b_rot = ps.cross(&we);
-        let b_trans = we;
-        b.fixed_rows_mut::<3>(0).add_assign(b_rot);
-        b.fixed_rows_mut::<3>(3).add_assign(b_trans);
+                let neg_skew_ps = -skew(&ps);
+                let ws = omega * neg_skew_ps;
 
-        // S = -[p_s]×  (CUDA の s0,s1,s2 がこの各列)
-        let neg_skew_ps = -skew(&ps);
+                let ws0: Vector3<f32> = ws.column(0).into();
+                let ws1: Vector3<f32> = ws.column(1).into();
+                let ws2: Vector3<f32> = ws.column(2).into();
 
-        // WS = Ω * S  (列 i = Ω * s_i)
-        let ws = omega * neg_skew_ps;
+                let h_rr =
+                    Matrix3::from_columns(&[ps.cross(&ws0), ps.cross(&ws1), ps.cross(&ws2)]);
 
-        let ws0: Vector3<f32> = ws.column(0).into();
-        let ws1: Vector3<f32> = ws.column(1).into();
-        let ws2: Vector3<f32> = ws.column(2).into();
+                h.fixed_view_mut::<3, 3>(0, 0).add_assign(h_rr);
+                h.fixed_view_mut::<3, 3>(0, 3).add_assign(ws.transpose());
+                h.fixed_view_mut::<3, 3>(3, 0).add_assign(ws);
+                h.fixed_view_mut::<3, 3>(3, 3).add_assign(omega);
 
-        // H_rr: 列 i = p_s × ws_i
-        let h_rr = Matrix3::from_columns(&[ps.cross(&ws0), ps.cross(&ws1), ps.cross(&ws2)]);
-
-        // H_rt: 行 i = ws_i  →  ws^T
-        // H_tr = H_rt^T = ws
-        // H_tt = Ω
-        h.fixed_view_mut::<3, 3>(0, 0).add_assign(h_rr);
-        h.fixed_view_mut::<3, 3>(0, 3).add_assign(ws.transpose()); // H_rt
-        h.fixed_view_mut::<3, 3>(3, 0).add_assign(ws); // H_tr
-        h.fixed_view_mut::<3, 3>(3, 3).add_assign(omega); // H_tt
-    }
+                (h, b)
+            },
+        )
+        .reduce(
+            || (Matrix6::zeros(), Vector6::zeros()),
+            |(h1, b1), (h2, b2)| (h1 + h2, b1 + b2),
+        );
 
     GicpLinearSystem { h, b }
 }

@@ -1,4 +1,5 @@
 use nalgebra::Point3;
+use rayon::prelude::*;
 
 use crate::compute_covariance::{VoxelCell, VoxelKey, VoxelMap, voxel_key};
 
@@ -17,56 +18,55 @@ pub fn find_nearest_voxels<'a>(
     search_range: i32,
     max_dist_sq: Option<f32>,
 ) -> Vec<Correspondence<'a>> {
-    let mut correspondences = Vec::new();
+    source_voxel_map
+        .par_iter()
+        .filter_map(|(_, src_cell)| {
+            if !src_cell.valid {
+                return None;
+            }
 
-    for (src_key, src_cell) in source_voxel_map {
-        if !src_cell.valid {
-            continue;
-        }
+            let base_key = voxel_key(&src_cell.mean, voxel_size);
 
-        // source の mean から target のボクセルキーを求める（基準キー）
-        let base_key = voxel_key(&src_cell.mean, voxel_size);
+            let mut best_dist_sq = f32::MAX;
+            let mut best_cell: Option<&VoxelCell> = None;
 
-        let mut best_dist_sq = f32::MAX;
-        let mut best_cell: Option<&VoxelCell> = None;
+            for dx in -search_range..=search_range {
+                for dy in -search_range..=search_range {
+                    for dz in -search_range..=search_range {
+                        let candidate_key = VoxelKey {
+                            ix: base_key.ix + dx,
+                            iy: base_key.iy + dy,
+                            iz: base_key.iz + dz,
+                        };
 
-        for dx in -search_range..=search_range {
-            for dy in -search_range..=search_range {
-                for dz in -search_range..=search_range {
-                    let candidate_key = VoxelKey {
-                        ix: base_key.ix + dx,
-                        iy: base_key.iy + dy,
-                        iz: base_key.iz + dz,
-                    };
+                        let Some(tgt_cell) = target_voxel_map.get(&candidate_key) else {
+                            continue;
+                        };
+                        if !tgt_cell.valid {
+                            continue;
+                        }
 
-                    let Some(tgt_cell) = target_voxel_map.get(&candidate_key) else {
-                        continue;
-                    };
-                    if !tgt_cell.valid {
-                        continue;
-                    }
+                        let diff = src_cell.mean - tgt_cell.mean;
+                        let dist_sq = diff.norm_squared();
 
-                    let diff = src_cell.mean - tgt_cell.mean;
-                    let dist_sq = diff.norm_squared();
-
-                    if dist_sq < best_dist_sq {
-                        best_dist_sq = dist_sq;
-                        best_cell = Some(tgt_cell);
+                        if dist_sq < best_dist_sq {
+                            best_dist_sq = dist_sq;
+                            best_cell = Some(tgt_cell);
+                        }
                     }
                 }
             }
-        }
 
-        if let Some(tgt_cell) = best_cell {
+            let tgt_cell = best_cell?;
             if max_dist_sq.map_or(true, |limit| best_dist_sq <= limit) {
-                correspondences.push(Correspondence {
+                Some(Correspondence {
                     source_cell: src_cell,
                     target_cell: tgt_cell,
                     dist_sq: best_dist_sq,
-                });
+                })
+            } else {
+                None
             }
-        }
-    }
-
-    correspondences
+        })
+        .collect()
 }
