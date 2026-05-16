@@ -22,7 +22,7 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway02";
 const SAVE_DIR: &str = "data/output/debug/05162026";
 
 const GICP_ITERATIONS: usize = 5;
@@ -205,9 +205,13 @@ fn main() -> Result<()> {
         );
         // --- Update target_voxel_map for the next frame ---
 
-        prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
+        // GICP補正後の位置差分から速度を推定（IMU積分のバイアス蓄積を避ける）
+        let prev_pos = current_global_pose.fixed_view::<3, 1>(0, 3).into_owned();
+        let new_pos = current_transform.fixed_view::<3, 1>(0, 3).into_owned();
+        let dt = (current_frame_start_time - prev_frame_start_time).max(1e-6);
+        current_velocity = (new_pos - prev_pos) / dt;
         current_global_pose = current_transform;
-        current_velocity = pose_prediction.1;
+        prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
 
     // --- Debug: Save final voxel map as PCD ---
