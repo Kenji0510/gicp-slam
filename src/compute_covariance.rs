@@ -215,14 +215,14 @@ pub fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
 
 pub fn build_gicp_voxel_map(
     points: &[Point3<f32>],
-    gaussian_voxel_size: f32,
+    gicp_voxel_size: f32,
     max_points_per_voxel: usize,
     min_points_per_voxel: usize,
 ) -> VoxelMap {
     let mut voxel_map = VoxelMap::new();
 
     for &p in points {
-        let key = voxel_key(&p, gaussian_voxel_size);
+        let key = voxel_key(&p, gicp_voxel_size);
         let cell = voxel_map.entry(key).or_insert_with(VoxelCell::new);
         cell.push_point(p, max_points_per_voxel);
     }
@@ -341,12 +341,9 @@ pub fn merge_points_into_gaussian_voxel_map(
     map: &mut VoxelMap,
     points: &[Point3<f32>],
     pose: &Matrix4<f64>,
-    gaussian_voxel_size: f32,
-    max_points_per_gaussian: usize,
-    min_points_per_gaussian: usize,
-    min_variance: f32,
-    max_variance: f32,
-    information_regularization: f32,
+    gicp_voxel_size: f32,
+    max_points_per_voxel: usize,
+    min_points_per_voxel: usize,
 ) {
     let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
     let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
@@ -355,21 +352,45 @@ pub fn merge_points_into_gaussian_voxel_map(
 
     for p in points {
         let transformed = Point3::from(rot * p.coords + trans);
-        let key = voxel_key(&transformed, gaussian_voxel_size);
+        let key = voxel_key(&transformed, gicp_voxel_size);
         let cell = map.entry(key).or_insert_with(VoxelCell::new);
 
-        if cell.push_point(transformed, max_points_per_gaussian) {
+        if cell.push_point(transformed, max_points_per_voxel) {
             modified_keys.insert(key);
         }
     }
 
-    let keys: Vec<VoxelKey> = modified_keys.into_iter().collect();
-    recompute_gaussians_for_keys(
-        map,
-        &keys,
-        min_points_per_gaussian,
-        min_variance,
-        max_variance,
-        information_regularization,
-    );
+    // Mean
+    for cell in map.values_mut() {
+        cell.mean = cell.compute_average();
+    }
+
+    // Covariance
+    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = map
+        .keys()
+        .cloned()
+        .map(|key| {
+            let neighbor_means_point: Vec<Point3<f32>> = neighbor_keys(&key)
+                .into_iter()
+                .filter_map(|neighbor_key| map.get(&neighbor_key))
+                .map(|cell| cell.mean)
+                .collect();
+            (key, neighbor_means_point)
+        })
+        .collect();
+
+    for (key, neighbor_means_point) in keys_and_neighbors {
+        if neighbor_means_point.len() < min_points_per_voxel {
+            continue;
+        }
+        if let Some(cell) = map.get_mut(&key) {
+            let mean = cell.mean;
+            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means_point, &mean)
+            {
+                cell.raw_covariance = raw_cov;
+                cell.covariance = regularize_gicp_covariance(raw_cov);
+                cell.valid = true;
+            }
+        }
+    }
 }
