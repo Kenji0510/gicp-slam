@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use anyhow::Result;
 use lidar_slam::{
     compute_covariance::{build_gicp_voxel_map, merge_points_into_gaussian_voxel_map},
@@ -8,20 +10,20 @@ use lidar_slam::{
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
     },
-    // find_nearest_points::find_gaussian_correspondences,
-    // gicp_gaussian_shape::{
-    //     GaussianShapeOptions, compute_gaussian_shape_linear_system, solve_gaussian_delta,
-    // },
-    predict_pose_by_imu::{align_imu_timestamps, predict_pose_by_imu},
+    predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
     tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
+    types::FrameData,
     voxelization::voxel_downsample_points,
 };
-use nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
+use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vector3};
 
 const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05122026/exp01";
 const SAVE_DIR: &str = "data/output/debug/05122026";
 
 const GAUSSIAN_ITERATIONS: usize = 5;
+
+const MIN_DIST: f32 = 0.1;
+const MAX_DIST: f32 = 48.0;
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
 // Quaternion (x, y, z, w): -0.705437, 0.708767, -0.00246579, 0.00097028
@@ -64,91 +66,67 @@ fn main() -> Result<()> {
         IMU_TO_LIDAR_QUAT_Z,
     ));
 
+    let mut current_global_pose = Matrix4::<f64>::identity();
+    let mut current_velocity = Vector3::<f64>::zeros();
+    let mut last_frame_time = imu_data[0].timestamp;
+
+    let mut local_map_queue: VecDeque<FrameData> = VecDeque::new();
+    let mut global_map_queue: VecDeque<FrameData> = VecDeque::new();
+    // global_map_queue.push()
+
     let pcd = load_pcd_xyzit(&pcd_files[0].to_string_lossy())?;
     let points = convert_pcd_to_xyz(&pcd);
 
     // --- Downsample for density normalization ---
     let downsample_voxel_size = 0.1_f32;
-    let gaussian_voxel_size = 0.4_f32;
 
     let downsampled_init_points = voxel_downsample_points(&points, downsample_voxel_size);
     // --- Downsample for density normalization ---
 
-    let converted_imu_data = convert_imu_data(&imu_data);
-    let pcd_start_time = pcd
+    let mut prev_frame_start_time = pcd
         .iter()
         .map(|p| p.timestamp)
         .fold(f64::INFINITY, f64::min);
-
-    // --- Build initial Gaussian voxel map ---
-    let max_points_per_gaussian = 150;
-    let min_points_per_gaussian = 5;
-    // min_variance: 小さすぎると平面法線方向の固有値が全voxelで揃い共分散が均一に見える
-    // voxel_size=0.4m での自然な下限は ~1e-2（≈10cm²）程度
-    let covariance_min_variance = 1.0e-2_f32;
-    // max_variance: voxel対角線(0.4*√3≈0.69m)の半分の二乗≈0.12。余裕を持たせ0.5
-    let covariance_max_variance = 0.5_f32;
-    let covariance_regularization = 1.0e-3_f32;
-
-    let mut target_voxel_map = build_gicp_voxel_map(
-        &downsampled_init_points,
-        gaussian_voxel_size,
-        max_points_per_gaussian,
-        min_points_per_gaussian,
-    );
-
-    let final_pcd = convert_voxel_map_to_pcd(&target_voxel_map);
-    let save_file_path = format!(
-        "{}/target_map_v-{}.pcd",
-        SAVE_DIR, gaussian_voxel_size
-    );
-    save_pcd_xyzcov(&final_pcd, &save_file_path)?;
-    log::info!("Saved final Gaussian voxel map as PCD: {}", save_file_path);
-    // --- Build initial Gaussian voxel map ---
-
-    let mut source_to_target =
-        Isometry3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity());
-
-    let mut prev_frame_time = pcd_start_time; // フレーム間のIMU積分用
-    let mut pose_log: Vec<serde_json::Value> = Vec::new();
-    let mut consecutive_skip_count: usize = 0;
-    // マップが陳腐化しないよう、連続スキップ上限を設ける
-    const MAX_CONSECUTIVE_SKIPS: usize = 10;
 
     for (i, pcd_path) in pcd_files.iter().enumerate().skip(1) {
         let source_pcd = load_pcd_xyzit(&pcd_path.to_string_lossy())?;
 
         // --- Predict pose by IMU ---
-        let source_pcd_start_time = source_pcd
+        let current_frame_start_time = source_pcd
             .iter()
             .map(|p| p.timestamp)
             .fold(f64::INFINITY, f64::min);
+        let current_frame_end_time = source_pcd
+            .iter()
+            .map(|p| p.timestamp)
+            .fold(f64::NEG_INFINITY, f64::max);
 
-        let frame_time_range = (prev_frame_time, source_pcd_start_time);
-        let pose_prediction = predict_pose_by_imu(&imu_data, frame_time_range, &imu_to_lidar, None);
-        println!(
-            "IMU-predicted pose change: Δposition=({:.3}, {:.3}, {:.3}) m, Δrotation=({:.3}, {:.3}, {:.3}) rad",
-            pose_prediction.position.x,
-            pose_prediction.position.y,
-            pose_prediction.position.z,
-            pose_prediction.delta_rotation.euler_angles().0,
-            pose_prediction.delta_rotation.euler_angles().1,
-            pose_prediction.delta_rotation.euler_angles().2,
+        let pose_prediction = predict_pose_by_imu(
+            &imu_data,
+            &imu_to_lidar,
+            &current_global_pose,
+            &current_velocity,
+            prev_frame_start_time,
+            current_frame_start_time,
         );
 
-        // IMU予測をsource_to_targetの初期値として反映する。
-        // delta_rotationはフレーム間の回転差分なので、前フレームのポーズに右から合成する。
-        // これにより最適化のinitial guessが改善し、収束が速く外れにくくなる。
-        let imu_delta_rotation = pose_prediction.delta_rotation.cast::<f32>();
-        source_to_target = source_to_target * Isometry3::from_parts(
-            Translation3::new(0.0, 0.0, 0.0),
-            imu_delta_rotation,
+        let rotation_traj = build_rotation_trajectory(
+            &imu_data,
+            current_frame_start_time,
+            current_frame_end_time,
+            &imu_to_lidar,
         );
-        // --- Predict pose by IMU ---
 
         // --- Deskew source pcd ---
-        let deskewed_points = deskew_points(&converted_imu_data, &imu_to_lidar, &source_pcd);
-        // --- Deskew source pcd ---
+        let deskewed_points = deskew_points(
+            &source_pcd,
+            &rotation_traj,
+            &imu_to_lidar,
+            current_frame_start_time,
+            MIN_DIST,
+            MAX_DIST,
+        );
+        // --- Deskew source pcd --- 05132026
 
         // --- Downsample the deskewed point cloud ---
         let downsampled_points = voxel_downsample_points(&deskewed_points, downsample_voxel_size);
@@ -345,7 +323,7 @@ fn main() -> Result<()> {
         //     "num_correspondences":last_num_correspondences,
         // }));
 
-        prev_frame_time = source_pcd_start_time; // 次フレームのIMU積分の開始時刻を更新
+        prev_frame_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
 
     // --- Save pose log as JSON ---

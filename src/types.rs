@@ -1,3 +1,4 @@
+use nalgebra::Point3;
 use pcd_rs::{PcdDeserialize, PcdSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -42,4 +43,10 @@ pub struct PointXYZCov {
     pub cov_yy: f32,
     pub cov_yz: f32,
     pub cov_zz: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct FrameData {
+    pub points: Vec<Point3<f32>>,
+    pub covariances: Vec<[[f32; 3]; 3]>,
 }

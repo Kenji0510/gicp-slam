@@ -32,33 +32,31 @@ const G: f64 = 9.80665;
 /// 初期ボディフレーム＝ワールドフレームとして、この方向をワールド重力として固定除去する。
 pub fn predict_pose_by_imu(
     imu_data: &Vec<IMU>,
-    frame_time_range: (f64, f64), // (start_time, end_time) sec
     imu_to_lidar: &UnitQuaternion<f64>,
-    prev_state: Option<&PosePrediction>,
-) -> PosePrediction {
-    let empty_result = PosePrediction {
-        position: Vector3::zeros(),
-        velocity: Vector3::zeros(),
-        // rotation: Vector3::zeros(),
-        delta_transform: Matrix4::identity(),
-        delta_rotation: UnitQuaternion::identity(),
-    };
+    prev_pose: &Matrix4<f64>,
+    prev_velocity: &Vector3<f64>,
+    prev_timestamp: f64,
+    current_timestamp: f64,
+) -> (Matrix4<f64>, Vector3<f64>) {
+    let tx = prev_pose[(0, 3)];
+    let ty = prev_pose[(1, 3)];
+    let tz = prev_pose[(2, 3)];
+    let mut position = Vector3::new(tx, ty, tz);
 
-    let mut rotation = prev_state.map(|s| s.delta_rotation).unwrap_or_default();
-    let mut velocity = prev_state.map(|s| s.velocity).unwrap_or_default();
-    let mut position = prev_state.map(|s| s.position).unwrap_or_default();
+    let mat3 = prev_pose.fixed_view::<3, 3>(0, 0).into_owned();
+    let mut rotation = UnitQuaternion::from_matrix(&mat3);
+    let mut velocity = *prev_velocity;
+
+    // LiDARが水平な状態を前提とする
     let gravity = Vector3::new(0.0, 0.0, G);
 
-    // --- Find the imu data from previous start frame time to current start frame time ---
-    let (start_idx, end_idx) = get_imu_range(imu_data, frame_time_range);
+    // 前回のフレームの終わりから今回のフレームの終わりまでのIMUデータを抽出
+    let relevant_imu_data: Vec<&IMU> = imu_data
+        .iter()
+        .filter(|s| s.timestamp >= prev_timestamp && s.timestamp <= current_timestamp)
+        .collect();
 
-    if start_idx == 0 || start_idx >= imu_data.len() || end_idx > imu_data.len() {
-        return empty_result;
-    }
-
-    let relevant_imu_data = &imu_data[start_idx..end_idx];
-
-    let mut last_time = imu_data[start_idx - 1].timestamp; // Use the timestamp of the last IMU data point before the frame start
+    let mut last_time = prev_timestamp;
 
     for sample in relevant_imu_data {
         let dt = sample.timestamp - last_time;
@@ -78,7 +76,7 @@ pub fn predict_pose_by_imu(
         let axis = if angle < 1e-9 {
             Vector3::x_axis() // Default axis if angular velocity is very small
         } else {
-            Unit::new_normalize(omega * dt)
+            Unit::new_normalize(omega)
         };
 
         let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
@@ -94,8 +92,9 @@ pub fn predict_pose_by_imu(
 
         // g単位→m/s²変換してワールドフレームへ回転し、重力を除去
         // static_gravity_g はワールドフレームの重力方向（初期ボディ=ワールド座標）
-        let acc_local = imu_to_lidar * (acc * G);
-        let acc_world = gravity - rotation * acc_local;
+        // let acc_local = imu_to_lidar * acc;
+        let acc_local = imu_to_lidar * acc * G;
+        let acc_world = rotation * acc_local - gravity;
 
         // --- Update position and velocity ---
         velocity += acc_world * dt;
@@ -114,13 +113,7 @@ pub fn predict_pose_by_imu(
         .fixed_view_mut::<3, 1>(0, 3)
         .copy_from(&position);
 
-    PosePrediction {
-        position,
-        velocity,
-        // rotation: q.euler_angles().into(),
-        delta_transform,
-        delta_rotation: rotation,
-    }
+    (delta_transform, velocity)
 }
 
 pub fn get_imu_range(
@@ -138,4 +131,52 @@ pub fn get_imu_range(
         .unwrap_or(imu_data.len() - 1);
 
     (start_idx, end_idx)
+}
+
+pub type RotationTrajectory = Vec<(f64, UnitQuaternion<f64>)>;
+
+pub fn build_rotation_trajectory(
+    imu_data: &Vec<IMU>,
+    start_time: f64,
+    end_time: f64,
+    imu_to_lidar: &UnitQuaternion<f64>,
+) -> RotationTrajectory {
+    let mut trajectory = Vec::new();
+    let mut current_rotation = UnitQuaternion::<f64>::identity();
+
+    let (start_idx, end_idx) = get_imu_range(imu_data, (start_time, end_time));
+    let relevant_imu_data: Vec<&IMU> = imu_data[start_idx..end_idx].iter().collect();
+
+    trajectory.push((imu_data[start_idx].timestamp, current_rotation));
+
+    let mut last_time = if start_idx > 0 {
+        imu_data[start_idx - 1].timestamp
+    } else {
+        start_time
+    };
+
+    for sample in relevant_imu_data {
+        let dt = sample.timestamp - last_time;
+
+        if dt <= 1e-9 {
+            continue;
+        }
+
+        let omega = Vector3::new(
+            sample.angular_velocity[0] as f64,
+            sample.angular_velocity[1] as f64,
+            sample.angular_velocity[2] as f64,
+        );
+        let omega = imu_to_lidar * omega;
+
+        let angle_axis = omega * dt;
+        let delta_q = UnitQuaternion::new(angle_axis);
+        current_rotation = current_rotation * delta_q;
+        current_rotation.renormalize();
+
+        trajectory.push((sample.timestamp, current_rotation));
+        last_time = sample.timestamp;
+    }
+
+    trajectory
 }

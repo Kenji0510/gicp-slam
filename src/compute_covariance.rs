@@ -57,10 +57,7 @@ impl VoxelCell {
         true
     }
 
-    pub fn recompute_covariance(
-        &mut self,
-        min_points_per_gaussian: usize,
-    ) {
+    pub fn recompute_covariance(&mut self, min_points_per_gaussian: usize) {
         self.valid = false;
 
         if self.points.is_empty() {
@@ -158,9 +155,7 @@ fn compute_raw_covariance_from_points(
 
 /// Gaussian covarianceとして使うため、固有値を範囲内にclampする。
 /// GICPの平面法線方向だけを強くする正則化とは違い、分布形状を残す。
-pub fn regularize_gaussian_covariance(
-    cov: Matrix3<f32>,
-) -> Matrix3<f32> {
+pub fn regularize_gaussian_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
     let eig = SymmetricEigen::new(cov);
     let mut d = Matrix3::<f32>::zeros();
 
@@ -168,11 +163,16 @@ pub fn regularize_gaussian_covariance(
     let rot = eigen.eigenvectors;
     let mut vals = eigen.eigenvalues;
 
-    let mut pairs: Vec<(f32, usize)> = vals.iter().cloned().enumerate().map(|(i, v)| (v, i)).collect();
+    let mut pairs: Vec<(f32, usize)> = vals
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, v)| (v, i))
+        .collect();
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     let min_idx = pairs[0].1;
-    vals[min_idx] = 1e-3;     // 法線方向を薄くする
+    vals[min_idx] = 1e-3; // 法線方向を薄くする
     vals[pairs[1].1] = 1.0;
     vals[pairs[2].1] = 5.0;
 
@@ -195,22 +195,14 @@ pub fn build_gicp_voxel_map(
         cell.push_point(p, max_points_per_gaussian);
     }
 
-    recompute_all_covariance(
-        &mut voxel_map,
-        min_points_per_gaussian,
-    );
+    recompute_all_covariance(&mut voxel_map, min_points_per_gaussian);
 
     voxel_map
 }
 
-pub fn recompute_all_covariance(
-    voxel_map: &mut VoxelMap,
-    min_points_per_gaussian: usize,
-) {
+pub fn recompute_all_covariance(voxel_map: &mut VoxelMap, min_points_per_gaussian: usize) {
     voxel_map.par_iter_mut().for_each(|(_, cell)| {
-        cell.recompute_covariance(
-            min_points_per_gaussian,
-        );
+        cell.recompute_covariance(min_points_per_gaussian);
     });
 }
 
@@ -226,9 +218,7 @@ pub fn recompute_gaussians_for_keys(
         .par_iter()
         .filter_map(|&key| {
             let mut cell = voxel_map.get(&key)?.clone();
-            cell.recompute_covariance(
-                min_points_per_gaussian,
-            );
+            cell.recompute_covariance(min_points_per_gaussian);
             Some((key, cell))
         })
         .collect();

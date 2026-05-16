@@ -2,36 +2,49 @@ use nalgebra::{Point3, Unit, UnitQuaternion, Vector3};
 
 use crate::{
     convert_imu_data::DeltaRotation,
+    predict_pose_by_imu::RotationTrajectory,
     types::{IMU, PointXYZIT},
 };
 
 pub fn deskew_points(
-    imu_data: &Vec<DeltaRotation>,
-    imu_to_lidar: &UnitQuaternion<f64>,
     pcd: &Vec<PointXYZIT>,
+    trajectory: &RotationTrajectory,
+    imu_to_lidar: &UnitQuaternion<f64>,
+    frame_min_time: f64,
+    min_dist: f32,
+    max_dist: f32,
 ) -> Vec<Point3<f32>> {
-    let (start_time, end_time) = get_time_for_start_and_end(pcd);
+    let n_points = pcd.len();
+    let mut deskewed_points = Vec::<Point3<f32>>::with_capacity(n_points);
 
-    let (start_idx, end_idx) = get_imu_range(&imu_data, (start_time, end_time));
-    let relevant_imu_data = &imu_data[start_idx..end_idx];
-    let mut deskewed_point_vecs: Vec<Point3<f32>> = Vec::with_capacity(pcd.len());
+    let start_rotation = get_rotation_at_time(trajectory, frame_min_time);
+    let start_rotation_inv = start_rotation.inverse();
 
-    // Deskewing each points
     for p in pcd {
-        let x = p.x as f32;
-        let y = p.y as f32;
-        let z = p.z as f32;
-        let point_time = p.timestamp;
+        let x = p.x;
+        let y = p.y;
+        let z = p.z;
 
-        let rotation = get_rotation_at_time(relevant_imu_data, point_time);
+        let dist_sq = x * x + y * y + z * z;
+        if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
+            continue;
+        }
 
-        let point_vec = Point3::new(x, y, z);
-        let correction = imu_to_lidar * rotation * imu_to_lidar.inverse();
-        let deskewed_point = correction.cast::<f32>() * point_vec;
-        deskewed_point_vecs.push(deskewed_point);
+        let timestamp = p.timestamp;
+        let current_rotation = get_rotation_at_time(trajectory, timestamp);
+
+        let relative_rotation = start_rotation_inv * current_rotation;
+
+        let p_vec = Vector3::new(p.x as f64, p.y as f64, p.z as f64);
+        let deskewed_p_vec = relative_rotation * (imu_to_lidar * p_vec);
+        deskewed_points.push(Point3::new(
+            deskewed_p_vec.x as f32,
+            deskewed_p_vec.y as f32,
+            deskewed_p_vec.z as f32,
+        ));
     }
 
-    deskewed_point_vecs
+    deskewed_points
 }
 
 fn get_time_for_start_and_end(pcd: &Vec<PointXYZIT>) -> (f64, f64) {
@@ -47,17 +60,47 @@ fn get_time_for_start_and_end(pcd: &Vec<PointXYZIT>) -> (f64, f64) {
     (start, end)
 }
 
-fn get_rotation_at_time(imu_data: &[DeltaRotation], timestamp: f64) -> UnitQuaternion<f64> {
-    let mut rotation = UnitQuaternion::<f64>::identity();
+// fn get_rotation_at_time(imu_data: &[DeltaRotation], timestamp: f64) -> UnitQuaternion<f64> {
+//     let mut rotation = UnitQuaternion::<f64>::identity();
 
-    for delta in imu_data {
-        if delta.timestamp > timestamp {
-            break;
-        }
-        rotation = rotation * delta.delta_rotation; // body-frame ω → right-compose
+//     for delta in imu_data {
+//         if delta.timestamp > timestamp {
+//             break;
+//         }
+//         rotation = rotation * delta.delta_rotation; // body-frame ω → right-compose
+//     }
+
+//     rotation
+// }
+
+fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64> {
+    if traj.is_empty() {
+        return UnitQuaternion::identity();
+    }
+    if t <= traj.first().unwrap().0 {
+        return traj.first().unwrap().1;
+    }
+    if t >= traj.last().unwrap().0 {
+        return traj.last().unwrap().1;
     }
 
-    rotation
+    // 線形探索
+    for i in 0..traj.len() - 1 {
+        let (t0, q0) = traj[i];
+        let (t1, q1) = traj[i + 1];
+
+        if t >= t0 && t <= t1 {
+            let denom = t1 - t0;
+            if denom.abs() < 1e-9 {
+                return q0;
+            }
+
+            let ratio = (t - t0) / denom;
+
+            return q0.slerp(&q1, ratio);
+        }
+    }
+    traj.last().unwrap().1
 }
 
 pub fn get_imu_range(
