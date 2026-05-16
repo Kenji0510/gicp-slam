@@ -206,7 +206,7 @@ pub fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
     let min_idx = pairs[0].1;
     vals[min_idx] = 1e-3; // 法線方向を薄くする
     vals[pairs[1].1] = 1.0;
-    vals[pairs[2].1] = 5.0;
+    vals[pairs[2].1] = 1.0;
 
     // C = R * S * R^T
     let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();

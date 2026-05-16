@@ -8,12 +8,12 @@ use lidar_slam::{
     compute_gicp::{compute_gicp_linear_system, solve_gicp},
     convert_imu_data::convert_imu_data,
     convert_type::{convert_pcd_to_xyz, convert_xyz_to_pcd},
-    debug::convert_voxel_map_to_pcd,
+    debug::{DebugData, convert_voxel_map_to_pcd},
     deskew_points::deskew_points,
     file_handler::{
         load_imu_data, load_pcd_files, load_pcd_xyzit, save_pcd_xyzcov, save_pcd_xyzit,
     },
-    find_nearest_points::find_nearest_voxels,
+    find_nearest_points::{Correspondence, find_nearest_voxels},
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
     tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
     transform::transform_points_to_global_frame,
@@ -25,16 +25,16 @@ use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuatern
 const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/hallway";
 const SAVE_DIR: &str = "data/output/debug/05162026";
 
-const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
+const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.1; // m
 const GICP_ITERATIONS: usize = 7;
 
-const MIN_DIST: f32 = 0.2;
+const MIN_DIST: f32 = 0.1;
 const MAX_DIST: f32 = 48.0;
 
 const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
 
-const SEARCH_RANGE: i32 = 3; // Range of 7x7x7 voxels
+const SEARCH_RANGE: i32 = 3; // Range of 5x5x5 voxels
 const MAX_DIST_SQ: f32 = 1.0; // Optional maximum distance squared
 
 // IMU coordination to LiDAR coordination (Robosense 96 beam)
@@ -69,6 +69,8 @@ fn main() -> Result<()> {
     );
 
     println!("{}", imu_data[0].timestamp);
+
+    let mut debug_data: Vec<DebugData> = Vec::new();
 
     // IMU coord to LiDAR coord transformation
     let imu_to_lidar = UnitQuaternion::new_normalize(Quaternion::new(
@@ -168,6 +170,10 @@ fn main() -> Result<()> {
         );
         // --- Build source Voxel voxel map ---
 
+        let mut dist = 0.0;
+        let mut cnt = 0usize;
+        let mut correspondence_num: usize = 0;
+
         for i in 0..GICP_ITERATIONS {
             // --- Transform source voxel map to global frame ---
             let transformed_source_voxel_map =
@@ -184,6 +190,28 @@ fn main() -> Result<()> {
             );
             // --- find nearest points ---
 
+            // --- DEBUG ---
+            correspondence_num = correspondences.len();
+            for c in &correspondences {
+                dist += c.dist_sq;
+            }
+            log::debug!(
+                "Average euclidean distance of correspondences: {}",
+                dist / correspondences.len() as f32
+            );
+            for c in &correspondences {
+                if MAX_DIST_SQ >= c.dist_sq {
+                    cnt += 1;
+                }
+            }
+            log::debug!(
+                "Number of correspondences within max distance: {} / {}",
+                cnt,
+                correspondences.len()
+            );
+            // --- DEBUG ---
+
+
             // --- compute GICP ---
             let gicp_result = compute_gicp_linear_system(&correspondences);
             if let Some(delta) = solve_gicp(&gicp_result, 1.0e-4) {
@@ -191,6 +219,11 @@ fn main() -> Result<()> {
             }
             // --- compute GICP ---
         }
+
+        debug_data.push(DebugData {
+            correspondences_num: correspondence_num,
+            dist: dist / correspondence_num as f32,
+        });
 
         // --- Update target_voxel_map for the next frame ---
         merge_points_into_gaussian_voxel_map(
@@ -207,7 +240,7 @@ fn main() -> Result<()> {
         let prev_pos = current_global_pose.fixed_view::<3, 1>(0, 3).into_owned();
         let new_pos = current_transform.fixed_view::<3, 1>(0, 3).into_owned();
         let dt = (current_frame_start_time - prev_frame_start_time).max(1e-6);
-        current_velocity = (new_pos - prev_pos) / dt;
+        current_velocity = ((new_pos - prev_pos) / dt).cap_magnitude(2.0); // 速度の上限を2 m/sに設定
         current_global_pose = current_transform;
         prev_frame_start_time = current_frame_start_time; // 次フレームのIMU積分の開始時刻を更新
     }
@@ -220,6 +253,12 @@ fn main() -> Result<()> {
     );
     save_pcd_xyzcov(&final_pcd, &save_file_path)?;
     log::info!("Saved final GICP voxel map as PCD: {}", save_file_path);
+
+    // --- Save debug_data as JSON ---
+    let debug_log_path = format!("{}/debug_data.json", SAVE_DIR);
+    std::fs::write(&debug_log_path, serde_json::to_string_pretty(&debug_data)?)?;
+    log::info!("Saved debug data ({} frames): {}", debug_data.len(), debug_log_path);
+    // --- Save debug_data as JSON ---
 
     Ok(())
 }

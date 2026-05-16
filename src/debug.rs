@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     compute_covariance::{VoxelCell, VoxelKey},
     types::PointXYZCov,
@@ -35,4 +37,10 @@ pub fn convert_voxel_map_to_pcd(voxel_map: &HashMap<VoxelKey, VoxelCell>) -> Vec
         // })
         // .flatten()
         .collect()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DebugData {
+    pub correspondences_num: usize,
+    pub dist: f32,
 }
