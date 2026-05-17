@@ -22,10 +22,10 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05162026/outdoor01";
-const SAVE_DIR: &str = "data/output/debug/05162026/outdoor01";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park06";
+const SAVE_DIR: &str = "data/output/debug/05162026/park06";
 
-const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.1; // m
+const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;
 
 const MIN_DIST: f32 = 0.1;
