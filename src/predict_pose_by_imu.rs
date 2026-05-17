@@ -92,8 +92,10 @@ pub fn predict_pose_by_imu(
 
         // g単位→m/s²変換してワールドフレームへ回転し、重力を除去
         // static_gravity_g はワールドフレームの重力方向（初期ボディ=ワールド座標）
-        // let acc_local = imu_to_lidar * acc;
-        let acc_local = imu_to_lidar * acc * G;
+        let acc_local = imu_to_lidar * acc;
+        // let acc_local = imu_to_lidar * acc * G;
+
+        // let acc_world = rotation * acc_local - gravity;
         let acc_world = rotation * acc_local - gravity;
 
         // --- Update position and velocity ---

@@ -1,6 +1,6 @@
 use nalgebra::{Isometry3, Matrix3, Matrix4, Point3, SymmetricEigen, Vector3};
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VoxelKey {
@@ -106,7 +106,7 @@ impl VoxelCell {
     }
 }
 
-pub type VoxelMap = HashMap<VoxelKey, VoxelCell>;
+pub type VoxelMap = FxHashMap<VoxelKey, VoxelCell>;
 
 #[inline]
 pub fn voxel_key(p: &Point3<f32>, voxel_size: f32) -> VoxelKey {
@@ -188,9 +188,6 @@ fn compute_raw_covariance_from_points(
 /// Gaussian covarianceとして使うため、固有値を範囲内にclampする。
 /// GICPの平面法線方向だけを強くする正則化とは違い、分布形状を残す。
 pub fn regularize_gicp_covariance(cov: Matrix3<f32>) -> Matrix3<f32> {
-    let eig = SymmetricEigen::new(cov);
-    let mut d = Matrix3::<f32>::zeros();
-
     let eigen = SymmetricEigen::new(cov);
     let rot = eigen.eigenvectors;
     let mut vals = eigen.eigenvalues;
@@ -219,7 +216,7 @@ pub fn build_gicp_voxel_map(
     max_points_per_voxel: usize,
     min_points_per_voxel: usize,
 ) -> VoxelMap {
-    let mut voxel_map = VoxelMap::new();
+    let mut voxel_map = VoxelMap::default();
 
     for &p in points {
         let key = voxel_key(&p, gicp_voxel_size);
@@ -305,16 +302,11 @@ pub fn transform_voxel_map(map: &VoxelMap, pose: &Matrix4<f64>, voxel_size: f32)
             let new_mean = Point3::from(rot * cell.mean.coords + trans);
             let new_covariance = rot * cell.covariance * rot.transpose();
             let new_raw_covariance = rot * cell.raw_covariance * rot.transpose();
-            let new_points = cell
-                .points
-                .iter()
-                .map(|p| Point3::from(rot * p.coords + trans))
-                .collect();
             let new_key = voxel_key(&new_mean, voxel_size);
             (
                 new_key,
                 VoxelCell {
-                    points: new_points,
+                    points: Vec::new(),
                     mean: new_mean,
                     raw_covariance: new_raw_covariance,
                     covariance: new_covariance,
@@ -341,7 +333,7 @@ pub fn merge_points_into_gaussian_voxel_map(
     let rot = pose.fixed_view::<3, 3>(0, 0).into_owned().cast::<f32>();
     let trans: Vector3<f32> = pose.fixed_view::<3, 1>(0, 3).into_owned().cast::<f32>();
 
-    let mut modified_keys = HashSet::<VoxelKey>::new();
+    let mut modified_keys = FxHashSet::<VoxelKey>::default();
 
     for p in points {
         let transformed = Point3::from(rot * p.coords + trans);
@@ -366,7 +358,7 @@ pub fn merge_points_into_gaussian_voxel_map(
 
     // Covariance: 変更voxel + その隣接voxelのみ再計算
     // (あるvoxelのmeanが変わると、そのvoxelを隣接に持つ全voxelの共分散も変わる)
-    let keys_to_update: HashSet<VoxelKey> = modified_keys
+    let keys_to_update: FxHashSet<VoxelKey> = modified_keys
         .iter()
         .flat_map(|key| {
             let mut ks: Vec<VoxelKey> = neighbor_keys(key).into_iter().collect();
@@ -376,29 +368,37 @@ pub fn merge_points_into_gaussian_voxel_map(
         .filter(|key| map.contains_key(key))
         .collect();
 
-    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>)> = keys_to_update
+    let keys_and_neighbors: Vec<(VoxelKey, Vec<Point3<f32>>, Point3<f32>)> = keys_to_update
         .into_iter()
-        .map(|key| {
+        .filter_map(|key| {
+            let cell = map.get(&key)?;
+            let mean = cell.mean;
             let neighbor_means: Vec<Point3<f32>> = neighbor_keys(&key)
                 .into_iter()
                 .filter_map(|nk| map.get(&nk))
-                .map(|cell| cell.mean)
+                .map(|c| c.mean)
                 .collect();
-            (key, neighbor_means)
+            Some((key, neighbor_means, mean))
         })
         .collect();
 
-    for (key, neighbor_means) in keys_and_neighbors {
-        if neighbor_means.len() < min_points_per_voxel {
-            continue;
-        }
-        if let Some(cell) = map.get_mut(&key) {
-            let mean = cell.mean;
-            if let Some(raw_cov) = compute_raw_covariance_from_points(&neighbor_means, &mean) {
-                cell.raw_covariance = raw_cov;
-                cell.covariance = regularize_gicp_covariance(raw_cov);
-                cell.valid = true;
+    let updates: Vec<(VoxelKey, Matrix3<f32>, Matrix3<f32>)> = keys_and_neighbors
+        .par_iter()
+        .filter_map(|(key, neighbor_means, mean)| {
+            if neighbor_means.len() < min_points_per_voxel {
+                return None;
             }
+            let raw_cov = compute_raw_covariance_from_points(neighbor_means, mean)?;
+            let cov = regularize_gicp_covariance(raw_cov);
+            Some((*key, raw_cov, cov))
+        })
+        .collect();
+
+    for (key, raw_cov, cov) in updates {
+        if let Some(cell) = map.get_mut(&key) {
+            cell.raw_covariance = raw_cov;
+            cell.covariance = cov;
+            cell.valid = true;
         }
     }
 }

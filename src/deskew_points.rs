@@ -27,7 +27,8 @@ pub fn deskew_points(
             let current_rotation = get_rotation_at_time(trajectory, p.timestamp);
             let relative_rotation = start_rotation_inv * current_rotation;
             let p_vec = Vector3::new(p.x as f64, p.y as f64, p.z as f64);
-            let deskewed = relative_rotation * (imu_to_lidar * p_vec);
+            // let deskewed = relative_rotation * (imu_to_lidar * p_vec);
+            let deskewed = relative_rotation * p_vec;
             Some(Point3::new(deskewed.x as f32, deskewed.y as f32, deskewed.z as f32))
         })
         .collect()
@@ -70,23 +71,16 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
         return traj.last().unwrap().1;
     }
 
-    // 線形探索
-    for i in 0..traj.len() - 1 {
-        let (t0, q0) = traj[i];
-        let (t1, q1) = traj[i + 1];
-
-        if t >= t0 && t <= t1 {
-            let denom = t1 - t0;
-            if denom.abs() < 1e-9 {
-                return q0;
-            }
-
-            let ratio = (t - t0) / denom;
-
-            return q0.slerp(&q1, ratio);
-        }
+    // バイナリサーチ
+    let idx = traj.partition_point(|(t0, _)| *t0 < t);
+    let (t0, q0) = traj[idx - 1];
+    let (t1, q1) = traj[idx];
+    let denom = t1 - t0;
+    if denom.abs() < 1e-9 {
+        return q0;
     }
-    traj.last().unwrap().1
+    let ratio = (t - t0) / denom;
+    q0.slerp(&q1, ratio)
 }
 
 pub fn get_imu_range(

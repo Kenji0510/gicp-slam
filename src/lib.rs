@@ -9,7 +9,7 @@ pub mod find_nearest_points;
 // pub mod gicp_gaussian_shape;
 pub mod compute_gicp;
 pub mod predict_pose_by_imu;
-pub mod tilt_correction;
+// pub mod tilt_correction;
 pub mod transform;
 pub mod types;
 pub mod voxelization;

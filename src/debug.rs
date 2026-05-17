@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
     types::PointXYZCov,
 };
 
-pub fn convert_voxel_map_to_pcd(voxel_map: &HashMap<VoxelKey, VoxelCell>) -> Vec<PointXYZCov> {
+pub fn convert_voxel_map_to_pcd(voxel_map: &FxHashMap<VoxelKey, VoxelCell>) -> Vec<PointXYZCov> {
     voxel_map
         .iter()
         .filter(|(_, cell)| cell.valid)

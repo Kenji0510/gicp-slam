@@ -15,21 +15,21 @@ use lidar_slam::{
     },
     find_nearest_points::{Correspondence, find_nearest_voxels},
     predict_pose_by_imu::{align_imu_timestamps, build_rotation_trajectory, predict_pose_by_imu},
-    tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
+    // tilt_correction::{apply_tilt_correction, compute_tilt_correction, estimate_gravity_from_imu},
     transform::transform_points_to_global_frame,
     types::FrameData,
     voxelization::voxel_downsample_points,
 };
 use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05162026/outdoor02";
-const SAVE_DIR: &str = "data/output/debug/05162026/outdoor02";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05162026/outdoor01";
+const SAVE_DIR: &str = "data/output/debug/05162026/outdoor01";
 
-const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
+const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.1; // m
 const GICP_ITERATIONS: usize = 5;
 
 const MIN_DIST: f32 = 0.1;
-const MAX_DIST: f32 = 48.0;
+const MAX_DIST: f32 = 45.0;
 
 const MAX_POINTS_PER_VOXEL: usize = 10;
 const MIN_POINTS_PER_VOXEL: usize = 3;
