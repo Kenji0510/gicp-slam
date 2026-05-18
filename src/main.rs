@@ -22,8 +22,8 @@ use lidar_slam::{
 };
 use nalgebra::{Isometry3, Matrix4, Point3, Quaternion, Translation3, UnitQuaternion, Vector3};
 
-const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05092026/park06";
-const SAVE_DIR: &str = "data/output/debug/05162026/park06";
+const LOAD_DIR: &str = "/home/kenji/workspace/rust/get_lidar_data/data/output/05172026/park08";
+const SAVE_DIR: &str = "data/output/debug/05172026/park08";
 
 const DOWNSAMPLE_VOXEL_SIZE: f32 = 0.2; // m
 const GICP_ITERATIONS: usize = 5;
@@ -221,7 +221,6 @@ fn main() -> Result<()> {
             );
             // --- DEBUG ---
 
-
             // --- compute GICP ---
             let start_gicp = std::time::Instant::now();
             let gicp_result = compute_gicp_linear_system(&correspondences);
@@ -280,11 +279,22 @@ fn main() -> Result<()> {
     // --- Save debug_data as JSON ---
     let debug_log_path = format!("{}/debug_gicp_data.json", SAVE_DIR);
     std::fs::write(&debug_log_path, serde_json::to_string_pretty(&debug_data)?)?;
-    log::info!("Saved debug data ({} frames): {}", debug_data.len(), debug_log_path);
+    log::info!(
+        "Saved debug data ({} frames): {}",
+        debug_data.len(),
+        debug_log_path
+    );
 
     let debug_log_path = format!("{}/debug_process_times.json", SAVE_DIR);
-    std::fs::write(&debug_log_path, serde_json::to_string_pretty(&debug_process_times)?)?;
-    log::info!("Saved debug process times ({} frames): {}", debug_process_times.len(), debug_log_path);
+    std::fs::write(
+        &debug_log_path,
+        serde_json::to_string_pretty(&debug_process_times)?,
+    )?;
+    log::info!(
+        "Saved debug process times ({} frames): {}",
+        debug_process_times.len(),
+        debug_log_path
+    );
     // --- Save debug_data as JSON ---
 
     Ok(())

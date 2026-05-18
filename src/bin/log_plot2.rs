@@ -8,9 +8,9 @@ use anyhow::{Context, Result, bail};
 use plotters::prelude::*;
 use serde::Deserialize;
 
-const GICP_DATA_PATH: &str = "data/output/debug/05162026/debug_gicp_data.json";
-const PROCESS_TIME_PATH: &str = "data/output/debug/05162026/debug_process_times.json";
-const OUT_DIR: &str = "data/output/debug/05162026";
+const GICP_DATA_PATH: &str = "data/output/debug/05162026/park08/debug_gicp_data.json";
+const PROCESS_TIME_PATH: &str = "data/output/debug/05162026/park08/debug_process_times.json";
+const OUT_DIR: &str = "data/output/debug/05162026/outdoor08";
 
 #[derive(Debug, Deserialize)]
 struct DebugData {
@@ -62,7 +62,11 @@ fn plot_correspondences(data: &[DebugData]) -> Result<()> {
     root.fill(&WHITE)?;
 
     let n = data.len();
-    let max_val = data.iter().map(|d| d.correspondences_num).max().unwrap_or(1) as f32;
+    let max_val = data
+        .iter()
+        .map(|d| d.correspondences_num)
+        .max()
+        .unwrap_or(1) as f32;
 
     let mut chart = ChartBuilder::on(&root)
         .caption("Correspondences per Frame", ("sans-serif", 24))
@@ -105,7 +109,10 @@ fn plot_dist(data: &[DebugData]) -> Result<()> {
         .fold(f32::NEG_INFINITY, f32::max);
 
     let mut chart = ChartBuilder::on(&root)
-        .caption("Average Correspondence Distance per Frame", ("sans-serif", 24))
+        .caption(
+            "Average Correspondence Distance per Frame",
+            ("sans-serif", 24),
+        )
         .margin(20)
         .x_label_area_size(40)
         .y_label_area_size(70)
@@ -141,11 +148,31 @@ fn plot_process_times(data: &[DebugProcessTime]) -> Result<()> {
     let n = data.len();
 
     let series: &[(&str, RGBColor, Box<dyn Fn(&DebugProcessTime) -> f32>)] = &[
-        ("Voxelization",   RGBColor(31, 119, 180),  Box::new(|d| d.voxelization_time_ms)),
-        ("Create VoxelMap", RGBColor(255, 127, 14), Box::new(|d| d.create_voxel_map_time_ms)),
-        ("Find Corresp",   RGBColor(44, 160, 44),   Box::new(|d| d.find_correspondences_time_ms)),
-        ("GICP Solve",     RGBColor(214, 39, 40),   Box::new(|d| d.gicp_time_ms)),
-        ("Merge",          RGBColor(148, 103, 189), Box::new(|d| d.merge_time_ms)),
+        (
+            "Voxelization",
+            RGBColor(31, 119, 180),
+            Box::new(|d| d.voxelization_time_ms),
+        ),
+        (
+            "Create VoxelMap",
+            RGBColor(255, 127, 14),
+            Box::new(|d| d.create_voxel_map_time_ms),
+        ),
+        (
+            "Find Corresp",
+            RGBColor(44, 160, 44),
+            Box::new(|d| d.find_correspondences_time_ms),
+        ),
+        (
+            "GICP Solve",
+            RGBColor(214, 39, 40),
+            Box::new(|d| d.gicp_time_ms),
+        ),
+        (
+            "Merge",
+            RGBColor(148, 103, 189),
+            Box::new(|d| d.merge_time_ms),
+        ),
     ];
 
     let max_val = series
@@ -190,4 +217,3 @@ fn plot_process_times(data: &[DebugProcessTime]) -> Result<()> {
     println!("Saved: {}", path);
     Ok(())
 }
-

@@ -29,7 +29,11 @@ pub fn deskew_points(
             let p_vec = Vector3::new(p.x as f64, p.y as f64, p.z as f64);
             // let deskewed = relative_rotation * (imu_to_lidar * p_vec);
             let deskewed = relative_rotation * p_vec;
-            Some(Point3::new(deskewed.x as f32, deskewed.y as f32, deskewed.z as f32))
+            Some(Point3::new(
+                deskewed.x as f32,
+                deskewed.y as f32,
+                deskewed.z as f32,
+            ))
         })
         .collect()
 }

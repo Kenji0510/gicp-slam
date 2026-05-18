@@ -54,8 +54,7 @@ pub fn compute_gicp_linear_system(correspondences: &[Correspondence]) -> GicpLin
                 let ws1: Vector3<f32> = ws.column(1).into();
                 let ws2: Vector3<f32> = ws.column(2).into();
 
-                let h_rr =
-                    Matrix3::from_columns(&[ps.cross(&ws0), ps.cross(&ws1), ps.cross(&ws2)]);
+                let h_rr = Matrix3::from_columns(&[ps.cross(&ws0), ps.cross(&ws1), ps.cross(&ws2)]);
 
                 h.fixed_view_mut::<3, 3>(0, 0).add_assign(h_rr);
                 h.fixed_view_mut::<3, 3>(0, 3).add_assign(ws.transpose());
